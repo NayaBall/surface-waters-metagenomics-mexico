@@ -1,0 +1,2206 @@
+---
+title: "Supplementary Material: One Health-based metagenomic surveillance reveals key drivers of bacterial diversity and resistome dynamics in surface waters of central Mexico"
+subtitle: "Reproducible Bioinformatics and Statistical Workflow"
+author: "Nayarit Emerita Ballesteros-Nova et al."
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: {html_document: {theme: flatly, highlight: tango, toc: true, toc_float: true, toc_depth: 3, number_sections: true, code_folding: show, df_print: paged}}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center", fig.retina = 3, fig.width = 9, fig.height = 6, cache = FALSE)
+```
+
+<div style="font-size: 0.9em; color: #555; background-color: #f8f9fa; padding: 15px; border-left: 4px solid #2c3e50; margin-bottom: 25px;">
+**Authors:** Nayarit Emérita Ballesteros-Nova<sup>1,8†</sup>, Saida Italivy Sánchez-Prado<sup>1†</sup>, Pavel Eduardo Hernández-Carreño<sup>2</sup>, Elizabeth Ernestina Godoy-Lozano<sup>3</sup>, Miguel Galarde-López<sup>4</sup>, Francisco Alejandro Ruíz-López<sup>1</sup>, Rebecca L. Bell<sup>5</sup>, Christopher Grim<sup>5</sup>, Eric W. Brown<sup>5</sup>, Marc W. Allard<sup>5</sup>, Zhao Chen<sup>6</sup>, Magaly Toro<sup>6</sup>, Jianghong Meng<sup>6,7</sup>, Orbelín Soberanis-Ramos<sup>1</sup>, María de la Salud Rubio-Lozano<sup>1</sup>, Enrique Jesús Delgado-Suárez<sup>1*</sup><br><br>
+**Affiliations:**<br>
+<sup>1</sup> Facultad de Medicina Veterinaria y Zootecnia, Universidad Nacional Autónoma de México, Ciudad de México, México.<br>
+<sup>2</sup> Centro Nacional de Referencia de Inocuidad y Bioseguridad Agroalimentaria, Estado de México, México.<br>
+<sup>3</sup> Centro de Investigación Sobre Enfermedades Infecciosas, Instituto Nacional de Salud Pública de México, Cuernavaca, Morelos, México.<br>
+<sup>4</sup> Centro Nacional de Investigación Disciplinaria en Salud Animal e Inocuidad, Instituto Nacional de Investigaciones Forestales, Agrícolas y Pecuarias, Mexico City, Mexico.<br>
+<sup>5</sup> Human Foods Program, U.S. Food and Drug Administration, College Park, Maryland, USA.<br>
+<sup>6</sup> Joint Institute for Food Safety and Applied Nutrition (JIFSAN) and Center for Food Safety & Security Systems (CFS3), University of Maryland, College Park, Maryland, USA.<br>
+<sup>7</sup> Department of Nutrition and Food Science, University of Maryland, College Park, Maryland, USA.<br>
+<sup>8</sup> *Current affiliation:* Centro de Investigación Biomédica de Occidente (CIBO), Instituto Mexicano del Seguro Social (IMSS), Guadalajara, Jalisco, Mexico.<br><br>
+<sup>†</sup> *These authors contributed equally to this work.*<br>
+<sup>*</sup> *Corresponding author:* Enrique Jesús Delgado-Suárez ([ejds@fmvz.unam.mx](mailto:ejds@fmvz.unam.mx))
+</div>
+
+# Overview {.unnumbered}
+
+This document contains the complete, reproducible workflow supporting the study **"One Health-based metagenomic surveillance reveals key drivers of bacterial diversity and resistome dynamics in surface waters of central Mexico"**. 
+
+Here we provide the step-by-step data preprocessing, statistical modeling, and high-resolution visualization scripts used to analyze shotgun metagenomic data from 31 surface water samples across central Mexico, encompassing taxonomic profiling, alpha and beta diversity, antimicrobial resistance gene (ARG) curation and normalization (RPKG), and tripartite cross-domain analyses (taxonomy, resistome, and physicochemical environment).
+
+<hr>
+
+# Environment Setup and Libraries
+
+## R Packages
+
+```{r libraries, eval=FALSE}
+library(tidyverse)
+library(janitor)
+library(reshape2)
+library(vegan)
+library(multcompView)
+library(ComplexHeatmap)
+library(circlize)
+library(ggrepel)
+library(patchwork)
+library(extrafont)
+library(grid)
+library(tiff)
+library(png)
+
+loadfonts(device = "pdf", quiet = TRUE)
+```
+
+## Python Environment (for ARG Deduplication & Manual Mapping)
+
+```{python python-libraries, eval=FALSE}
+import pandas as pd
+import numpy as np
+```
+
+<hr>
+
+# Taxonomic Profiling and Relative Abundance (31 Samples)
+
+This section processes the taxonomic matrices across six hierarchical levels (*Phylum*, *Class*, *Order*, *Family*, *Genus*, and *Species*), removes residual eukaryotic/human host sequences, generates publication-ready relative abundance barplots for dominant taxa (> 1% mean relative abundance), consolidates master abundance tables, and performs compositional statistical comparisons using Centered Log-Ratio (CLR) transformation.
+
+## Multilevel Processing (Phylum, Class, Order, and Family)
+
+```{r multilevel-processing, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/ABUNDANCIA_ULTIMA")
+
+levels <- c("family", "phylum", "order", "class")
+
+process_level <- function(level) {
+  file_name <- paste0("integrated_matrix_31_", level, ".txt")
+  
+  if (!file.exists(file_name)) {
+    message("File not found: ", file_name)
+    return(NULL)
+  }
+  
+  abundance_matrix <- read.delim(file_name, header = TRUE, sep = "\t", check.names = FALSE)
+  colnames(abundance_matrix) <- gsub(paste0("\\.", level), "", colnames(abundance_matrix))
+  
+  sample_cols <- colnames(abundance_matrix)[2:ncol(abundance_matrix)]
+  clean_sample_cols <- gsub(".*?([A-Za-z]+)[^1-9]*([1-9][0-9]*).*", "\\1\\2", sample_cols)
+  colnames(abundance_matrix)[2:ncol(abundance_matrix)] <- clean_sample_cols
+  
+  human_pattern <- "Homo|Hominidae|Primates|sapiens"
+  taxa_column <- colnames(abundance_matrix)[1]
+  
+  rows_before <- nrow(abundance_matrix)
+  abundance_matrix <- abundance_matrix %>% 
+    filter(!grepl("Chordata", .[, 1], ignore.case = TRUE)) %>%
+    filter(!grepl(human_pattern, .data[[taxa_column]], ignore.case = TRUE))
+  rows_after <- nrow(abundance_matrix)
+  
+  if ((rows_before - rows_after) > 0) {
+    message("--> [", level, "] Removed ", rows_before - rows_after, " rows associated with human/eukaryotic contamination.")
+  }
+  
+  table_abs <- as.matrix(abundance_matrix[, 2:ncol(abundance_matrix)])
+  rownames(table_abs) <- abundance_matrix[, 1]
+  
+  if (nrow(table_abs) == 0 || sum(table_abs) == 0) {
+    message("Warning: The matrix for ", level, " is empty after filtering.")
+    return(NULL)
+  }
+  
+  table_rel <- sweep(table_abs, 2, colSums(table_abs), FUN = "/") * 100
+  
+  abs_export <- as.data.frame(table_abs) %>% rownames_to_column("Sample name")
+  rel_export <- as.data.frame(table_rel) %>% rownames_to_column("Sample name")
+  
+  write.csv(abs_export, paste0("Absolute_Abundance_31_", level, ".csv"), row.names = FALSE)
+  write.csv(rel_export, paste0("Relative_Abundance_31_", level, ".csv"), row.names = FALSE)
+  
+  message("Successfully processed: ", level)
+}
+
+for (level in levels) {
+  process_level(level)
+}
+```
+
+## Genus-Level Relative Abundance (> 1%) and Figure 3 Assembly
+
+```{r genus-abundance-plots, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/ABUNDANCIA_ULTIMA")
+
+metadatos_raw <- read_tsv("metadatos_saida_ultimos2.txt", col_names = TRUE, show_col_types = FALSE)
+
+if (is.na(colnames(metadatos_raw)[1]) || colnames(metadatos_raw)[1] == "" || grepl("^\\s*$", colnames(metadatos_raw)[1])) {
+  colnames(metadatos_raw)[1] <- "Sample"
+}
+
+colnames(metadatos_raw) <- trimws(gsub("[\"']", "", colnames(metadatos_raw)))
+colnames(metadatos_raw) <- gsub(" ", "_", colnames(metadatos_raw))
+colnames(metadatos_raw) <- make.names(colnames(metadatos_raw), unique = TRUE)
+
+if (!"Sample" %in% colnames(metadatos_raw)) {
+  metadatos_raw <- metadatos_raw %>% rename(Sample = 1)
+}
+
+metadatos <- as.data.frame(metadatos_raw)
+metadatos$Sample <- trimws(as.character(metadatos[, "Sample"]))
+metadatos$State  <- trimws(as.character(metadatos[, "State"]))
+metadatos$Water_body_type <- trimws(as.character(metadatos[, "Water_body_type"]))
+
+matrix_abund <- read.delim("integrated_matrix_31_genus.txt", header = TRUE, sep = "\t", check.names = FALSE) %>% 
+  filter(!grepl("Homo|Hominidae|Primates|sapiens", .[, 1], ignore.case = TRUE))
+
+tabla <- as.matrix(matrix_abund[, 2:ncol(matrix_abund)])
+rownames(tabla) <- matrix_abund[, 1] 
+
+limpiar_nombre_matriz <- function(sample_vector) {
+  sapply(sample_vector, function(s) {
+    if (!grepl("_", s)) return(s)
+    partes <- strsplit(s, "_")[[1]]
+    lugar <- partes[1]
+    num_int <- NA
+    for (p in partes[2:length(partes)]) {
+      val <- suppressWarnings(as.numeric(p))
+      if (!is.na(val)) {
+        num_int <- val
+        break
+      }
+    }
+    if (is.na(num_int)) num_int <- 1
+    paste0(lugar, num_int)
+  }, USE.NAMES = FALSE)
+}
+
+colnames(tabla) <- limpiar_nombre_matriz(colnames(tabla))
+tabla_rel <- sweep(tabla, 2, colSums(tabla), FUN = "/") * 100
+
+prepare_table_greater_1 <- function(df_input) {
+  mean_taxa <- rowMeans(df_input)
+  taxa_names <- names(mean_taxa[mean_taxa > 1])
+  
+  df_temp <- as.data.frame(df_input)
+  colnames(df_temp) <- make.names(colnames(df_temp), unique = TRUE)
+  if ("Taxa" %in% colnames(df_temp)) colnames(df_temp)[colnames(df_temp) == "Taxa"] <- "Taxa_Orig"
+  
+  tabla_filtrada <- df_temp %>%
+    rownames_to_column("Taxa") %>%
+    filter(Taxa %in% taxa_names) %>%
+    mutate(Mean_Order = rowMeans(dplyr::select(., -Taxa))) %>%
+    arrange(desc(Mean_Order)) %>% 
+    dplyr::select(-Mean_Order)
+  
+  etiqueta_resto <- "Others (Abundance < 1 %)"
+  matriz_num <- tabla_filtrada %>% column_to_rownames("Taxa")
+  resto_val <- 100 - colSums(matriz_num)
+  
+  fila_resto <- as.data.frame(t(resto_val)) %>% mutate(Taxa = etiqueta_resto)
+  
+  melt_df <- bind_rows(tabla_filtrada, fila_resto) %>%
+    pivot_longer(cols = -Taxa, names_to = "Sample", values_to = "Freq") %>%
+    mutate(Taxa = factor(Taxa, levels = c(tabla_filtrada$Taxa, etiqueta_resto)))
+  
+  return(melt_df)
+}
+
+melt_subtable_genus <- prepare_table_greater_1(tabla_rel) %>%
+  left_join(metadatos, by = "Sample", suffix = c("", ".y")) %>%
+  select(-ends_with(".y"))
+
+taxa_levels <- levels(melt_subtable_genus$Taxa)
+taxa_sin_others <- setdiff(taxa_levels, "Others (Abundance < 1 %)")
+
+italic_labels_genus <- function(taxa_vector) {
+  lapply(taxa_vector, function(x) bquote(italic(.(x))))
+}
+
+paleta_base <- c("#E6194B", "#3CB44B", "#FFE119", "#4363D8", "#F58231", 
+                 "#911EB4", "#46F0F0", "#F032E6", "#BCF60C", "#FABEBE", 
+                 "#008080", "#E6BEFF", "#9A6324", "#FFFAC8", "#800000", 
+                 "#AAFFC3", "#2F4F4F", "#000075", "#808000")
+
+num_taxa_sin_others <- length(taxa_sin_others)
+paleta_colores <- if (num_taxa_sin_others > length(paleta_base)) {
+  colorRampPalette(paleta_base)(num_taxa_sin_others)
+} else {
+  paleta_base[1:num_taxa_sin_others]
+}
+names(paleta_colores) <- taxa_sin_others
+
+if (!dir.exists("figures")) dir.create("figures")
+if (!dir.exists("figures/tables")) dir.create("figures/tables")
+
+grouping_vars <- c("State", "Water_body_type")
+
+for (g_var in grouping_vars) {
+  plot_data <- melt_subtable_genus %>%
+    filter(Taxa != "Others (Abundance < 1 %)" & !is.na(!!sym(g_var))) %>%
+    mutate(
+      Grouping_Col = .data[[g_var]],
+      Sample = factor(Sample, levels = unique(Sample[order(Grouping_Col, State, Water_body_type, Sample)]))
+    )
+  
+  p <- ggplot(plot_data, aes(x = Sample, y = Freq, fill = Taxa)) +
+    geom_bar(stat = "identity", width = 0.9, color = "black", linewidth = 0.01) +
+    facet_grid(as.formula(paste(". ~", g_var)), scales = "free_x", space = "free_x") +
+    scale_x_discrete(labels = function(x) x) +
+    scale_fill_manual(values = paleta_colores, labels = italic_labels_genus(taxa_sin_others), breaks = taxa_sin_others) +
+    theme_minimal() +
+    theme(
+      text = element_text(family = "Arial"),
+      plot.margin = margin(t = 45, r = 10, b = 10, l = 35, unit = "pt"),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 9.5, color = "black"),
+      axis.text.y = element_text(size = 12, color = "black", face = "plain"),
+      axis.title.y = element_text(size = 14, face = "bold"),
+      panel.border = element_rect(fill = NA, colour = "black"),
+      strip.background = element_rect(fill = "white", colour = "black"), 
+      strip.text = element_text(face = "bold", size = 13, margin = margin(t = 5, b = 5)),
+      panel.spacing = unit(0, "lines"),
+      legend.position = "bottom",
+      legend.box.margin = margin(t = -5, b = 0),
+      legend.margin = margin(t = 15, b = 20),
+      legend.text = element_text(size = 13),
+      legend.text.align = 0
+    ) +
+    labs(x = "", y = "Relative abundance (%)", fill = "") +
+    scale_y_continuous(expand = c(0, 0)) +
+    guides(fill = guide_legend(ncol = 3, byrow = FALSE, override.aes = list(color = "black", linewidth = 0.2)))
+  
+  file_name_tiff <- paste0("figures/abund_1_percent_genus_", tolower(g_var), "_no_others.tiff")
+  ggsave(file_name_tiff, plot = p, width = 15.5, height = 10, dpi = 500, compression = "lzw", device = "tiff")
+}
+
+df_abs_wide <- as.data.frame(tabla) %>% rownames_to_column("Taxa")
+write.csv(df_abs_wide, "figures/tables/Absolute_Abundance_31_genus.csv", row.names = FALSE)
+
+df_rel_wide <- as.data.frame(tabla_rel) %>% rownames_to_column("Taxa")
+write.csv(df_rel_wide, "figures/tables/Relative_Abundance_31_genus.csv", row.names = FALSE)
+```
+
+### Assembly of Figure 3A and Figure 3B
+
+```{r figure-3-assembly, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/ABUNDANCIA_ULTIMA/figures")
+
+img_A_raw <- readTIFF("abund_1_percent_genus_state_no_others.tiff")
+img_B_raw <- readTIFF("abund_1_percent_genus_water_body_type_no_others.tiff")
+
+grob_A <- rasterGrob(img_A_raw, interpolate = TRUE)
+grob_B <- rasterGrob(img_B_raw, interpolate = TRUE)
+
+tema_publicacion <- theme(
+  text = element_text(family = "sans"),
+  plot.tag = element_text(size = 28, face = "bold", family = "sans"),
+  plot.tag.position = c(0.03, 0.96),
+  plot.margin = margin(t = 25, r = 5, b = 5, l = 25, unit = "pt") 
+)
+
+pA <- ggplot() + annotation_custom(grob_A, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "A") + tema_publicacion
+pB <- ggplot() + annotation_custom(grob_B, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "B") + tema_publicacion
+
+ggsave("Figure_3A.tiff", plot = pA, width = 15.5, height = 10, dpi = 500, compression = "lzw", device = "tiff")
+ggsave("Figure_3B.tiff", plot = pB, width = 15.5, height = 10, dpi = 500, compression = "lzw", device = "tiff")
+```
+
+## Species-Level Relative Abundance (> 1%) and Figure S2 Assembly
+
+```{r species-abundance-plots, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/ABUNDANCIA_ULTIMA")
+
+matrix_abund_sp <- read.delim("integrated_matrix_31_species.txt", header = TRUE, sep = "\t", check.names = FALSE) %>% 
+  filter(!grepl("Homo|Hominidae|Primates|sapiens", .[, 1], ignore.case = TRUE))
+
+tabla_sp <- as.matrix(matrix_abund_sp[, 2:ncol(matrix_abund_sp)])
+rownames(tabla_sp) <- matrix_abund_sp[, 1] 
+colnames(tabla_sp) <- limpiar_nombre_matriz(colnames(tabla_sp))
+
+tabla_rel_sp <- sweep(tabla_sp, 2, colSums(tabla_sp), FUN = "/") * 100
+
+melt_subtable_species <- prepare_table_greater_1(tabla_rel_sp) %>%
+  left_join(metadatos, by = "Sample", suffix = c("", ".y")) %>%
+  select(-ends_with(".y"))
+
+taxa_levels_sp <- levels(melt_subtable_species$Taxa)
+taxa_sin_others_sp <- setdiff(taxa_levels_sp, "Others (Abundance < 1 %)")
+
+italic_labels_species <- function(taxa_vector) {
+  lapply(taxa_vector, function(x) {
+    if (x == "Acinetobacter sp. NEB 394") {
+      return(bquote(italic("Acinetobacter") ~ "sp. NEB 394"))
+    } else {
+      return(bquote(italic(.(x))))
+    }
+  })
+}
+
+mapeo_generos_base <- c(
+  "Acinetobacter"     = "#E6194B",
+  "Aeromonas"         = "#3CB44B",
+  "Aliarcobacter"     = "#FFE119",
+  "Microcystis"       = "#4363D8",
+  "Mycolicibacterium" = "#F58231",
+  "Fluviibacter"      = "#911EB4",
+  "Acidovorax"        = "#46F0F0",
+  "Pseudomonas"       = "#F032E6",
+  "Faucicola"         = "#BCF60C",
+  "Escherichia"       = "#FABEBE",
+  "Polynucleobacter"  = "#008080",
+  "Mycobacterium"     = "#E6BEFF",
+  "Synechococcus"     = "#9A6324",
+  "Flavobacterium"    = "#FFFAC8",
+  "Streptomyces"      = "#800000"
+)
+
+generos_taxa <- sapply(taxa_sin_others_sp, function(x) stringr::word(x, 1))
+generos_fijos <- c("Aliarcobacter", "Microcystis", "Acidovorax", "Fluviibacter", "Faucicola", "Escherichia")
+
+paleta_alternativa <- c(
+  "#E74C3C", "#3498DB", "#2ECC71", "#9B59B6", "#E67E22", 
+  "#1ABC9C", "#F1C40F", "#34495E", "#D35400", "#8E44AD", 
+  "#16A085", "#C0392B", "#27AE60", "#2980B9", "#D68910", 
+  "#7D3C98", "#5D6D7E", "#52BE80", "#E08283", "#AF7AC5"
+)
+
+colores_taxa_sp <- character(length(taxa_sin_others_sp))
+names(colores_taxa_sp) <- taxa_sin_others_sp
+
+idx_alt <- 1
+for (i in seq_along(taxa_sin_others_sp)) {
+  t_name <- taxa_sin_others_sp[i]
+  gen <- generos_taxa[i]
+  
+  if (gen %in% generos_fijos && gen %in% names(mapeo_generos_base)) {
+    colores_taxa_sp[t_name] <- mapeo_generos_base[gen]
+  } else {
+    colores_taxa_sp[t_name] <- paleta_alternativa[idx_alt]
+  }
+}
+
+for (g_var in grouping_vars) {
+  plot_data <- melt_subtable_species %>%
+    filter(Taxa != "Others (Abundance < 1 %)" & !is.na(!!sym(g_var))) %>%
+    mutate(
+      Grouping_Col = .data[[g_var]],
+      Sample = factor(Sample, levels = unique(Sample[order(Grouping_Col, State, Water_body_type, Sample)]))
+    )
+  
+  p <- ggplot(plot_data, aes(x = Sample, y = Freq, fill = Taxa)) +
+    geom_bar(stat = "identity", width = 0.9, color = "black", linewidth = 0.01) +
+    facet_grid(as.formula(paste(". ~", g_var)), scales = "free_x", space = "free_x") +
+    scale_x_discrete(labels = function(x) x) +
+    scale_fill_manual(values = colores_taxa_sp, labels = italic_labels_species(taxa_sin_others_sp), breaks = taxa_sin_others_sp) +
+    theme_minimal() +
+    theme(
+      text = element_text(family = "Arial"),
+      plot.margin = margin(t = 45, r = 10, b = 10, l = 35, unit = "pt"),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 9.5, color = "black"),
+      axis.text.y = element_text(size = 12, color = "black", face = "plain"),
+      axis.title.y = element_text(size = 14, face = "bold"),
+      panel.border = element_rect(fill = NA, colour = "black"),
+      strip.background = element_rect(fill = "white", colour = "black"), 
+      strip.text = element_text(face = "bold", size = 13, margin = margin(t = 5, b = 5)),
+      panel.spacing = unit(0, "lines"),
+      legend.position = "bottom",
+      legend.box.margin = margin(t = -5, b = 0),
+      legend.margin = margin(t = 15, b = 20),
+      legend.text = element_text(size = 13),
+      legend.text.align = 0
+    ) +
+    labs(x = "", y = "Relative abundance (%)", fill = "") +
+    scale_y_continuous(expand = c(0, 0)) +
+    guides(fill = guide_legend(ncol = 3, byrow = FALSE, override.aes = list(color = "black", linewidth = 0.2)))
+  
+  file_name_tiff <- paste0("figures/abund_1_percent_species_", tolower(g_var), "_no_others.tiff")
+  ggsave(file_name_tiff, plot = p, width = 15.5, height = 10, dpi = 500, compression = "lzw", device = "tiff")
+}
+
+df_abs_wide_sp <- as.data.frame(tabla_sp) %>% rownames_to_column("Taxa")
+write.csv(df_abs_wide_sp, "figures/tables/Absolute_Abundance_31_species.csv", row.names = FALSE)
+
+df_rel_wide_sp <- as.data.frame(tabla_rel_sp) %>% rownames_to_column("Taxa")
+write.csv(df_rel_wide_sp, "figures/tables/Relative_Abundance_31_species.csv", row.names = FALSE)
+```
+
+### Assembly of Supplementary Figure S2A and Figure S2B
+
+```{r figure-s2-assembly, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/ABUNDANCIA_ULTIMA/figures")
+
+img_A_raw <- readTIFF("abund_1_percent_species_state_no_others.tiff")
+img_B_raw <- readTIFF("abund_1_percent_species_water_body_type_no_others.tiff")
+
+grob_A <- rasterGrob(img_A_raw, interpolate = TRUE)
+grob_B <- rasterGrob(img_B_raw, interpolate = TRUE)
+
+pA <- ggplot() + annotation_custom(grob_A, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "A") + tema_publicacion
+pB <- ggplot() + annotation_custom(grob_B, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "B") + tema_publicacion
+
+ggsave("Figure_S2A.tiff", plot = pA, width = 15.5, height = 10, dpi = 500, compression = "lzw", device = "tiff")
+ggsave("Figure_S2B.tiff", plot = pB, width = 15.5, height = 10, dpi = 500, compression = "lzw", device = "tiff")
+```
+
+## Consolidation of Master Abundance Tables (All 6 Taxonomic Ranks)
+
+```{r master-abundance-tables, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/ABUNDANCIA_ULTIMA")
+
+format_sample_name <- function(sample_vector) {
+  sapply(sample_vector, function(x) {
+    m <- regmatches(x, regexec("^([A-Za-z]+).*?([0-9]+)$", x))
+    if (length(m[[1]]) == 3) {
+      state <- m[[1]][2]
+      num <- sub("^0+", "", m[[1]][3])
+      if (num == "") num <- "0"
+      paste0(state, num)
+    } else {
+      x
+    }
+  }, USE.NAMES = FALSE)
+}
+
+process_wide_abs <- function(file_path, level_name) {
+  df <- read.csv(file_path, check.names = FALSE)
+  colnames(df)[1] <- "Taxa"
+  
+  df %>%
+    pivot_longer(cols = -Taxa, names_to = "Sample name", values_to = "Absolute_Abundance") %>%
+    mutate(
+      `Sample name` = format_sample_name(`Sample name`),
+      Taxonomic_Level = level_name
+    ) %>%
+    select(Taxonomic_Level, Taxa, `Sample name`, Absolute_Abundance)
+}
+
+master_abs_table <- bind_rows(
+  process_wide_abs("Absolute_Abundance_31_phylum.csv", "Phylum"),
+  process_wide_abs("Absolute_Abundance_31_class.csv", "Class"),
+  process_wide_abs("Absolute_Abundance_31_order.csv", "Order"),
+  process_wide_abs("Absolute_Abundance_31_family.csv", "Family"),
+  process_wide_abs("Absolute_Abundance_31_genus.csv", "Genus"),
+  process_wide_abs("Absolute_Abundance_31_species.csv", "Species")
+)
+
+write.csv(master_abs_table, "Master_Table_Absolute_Abundance.csv", row.names = FALSE)
+
+process_wide_rel <- function(file_path, level_name) {
+  df <- read.csv(file_path, check.names = FALSE)
+  colnames(df)[1] <- "Taxa"
+  
+  df %>%
+    pivot_longer(cols = -Taxa, names_to = "Sample name", values_to = "Relative_Abundance") %>%
+    mutate(
+      `Sample name` = format_sample_name(`Sample name`),
+      Taxonomic_Level = level_name
+    ) %>%
+    select(Taxonomic_Level, Taxa, `Sample name`, Relative_Abundance)
+}
+
+master_rel_table <- bind_rows(
+  process_wide_rel("Relative_Abundance_31_phylum.csv", "Phylum"),
+  process_wide_rel("Relative_Abundance_31_class.csv", "Class"),
+  process_wide_rel("Relative_Abundance_31_order.csv", "Order"),
+  process_wide_rel("Relative_Abundance_31_family.csv", "Family"),
+  process_wide_rel("Relative_Abundance_31_genus.csv", "Genus"),
+  process_wide_rel("Relative_Abundance_31_species.csv", "Species")
+)
+
+write.csv(master_rel_table, "Master_Table_Relative_Abundance.csv", row.names = FALSE)
+```
+
+## Compositional CLR Transformation & Kruskal-Wallis Analysis (Taxa > 1%)
+
+```{r clr-kruskal-wallis, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/ABUNDANCIA_ULTIMA")
+
+df_genus_raw   <- read.csv("Complete_Table_Relative_Abundance_Genus.csv", header = TRUE, check.names = FALSE)
+df_species_raw <- read.csv("Complete_Table_Relative_Abundance_Species.csv", header = TRUE, check.names = FALSE)
+metadata_raw   <- read_tsv("metadatos_saida_ultimos2.txt", col_names = TRUE, show_col_types = FALSE)
+
+metadata_stats <- as.data.frame(metadata_raw)
+colnames(metadata_stats) <- trimws(gsub("[\"']", "", colnames(metadata_stats)))
+if (!"Sample" %in% colnames(metadata_stats)) colnames(metadata_stats)[1] <- "Sample"
+
+metadata_stats$Sample <- trimws(as.character(metadata_stats$Sample))
+metadata_stats$State  <- trimws(as.character(metadata_stats$State))
+
+if ("Water body type" %in% colnames(metadata_stats) && !"Water_body_type" %in% colnames(metadata_stats)) {
+  metadata_stats$Water_body_type <- trimws(as.character(metadata_stats[["Water body type"]]))
+} else if ("Water_body_type" %in% colnames(metadata_stats)) {
+  metadata_stats$Water_body_type <- trimws(as.character(metadata_stats$Water_body_type))
+}
+
+process_long_abundance <- function(df, rank_name) {
+  if ("Sample" %in% colnames(df) && !"SampleID" %in% colnames(df)) {
+    df <- df %>% rename(SampleID = Sample)
+  } else if ("Sample name" %in% colnames(df) && !"SampleID" %in% colnames(df)) {
+    df <- df %>% rename(SampleID = `Sample name`)
+  }
+  
+  val_col <- intersect(c("Relative_Abundance_Pct", "Relative_Abundance", "Abundance"), colnames(df))[1]
+  
+  df %>%
+    rename(Relative_Abundance = all_of(val_col)) %>%
+    mutate(Taxonomic_Rank = rank_name) %>%
+    select(Taxonomic_Rank, Taxa, SampleID, Relative_Abundance)
+}
+
+df_long <- bind_rows(
+  process_long_abundance(df_genus_raw, "Genus"),
+  process_long_abundance(df_species_raw, "Species")
+) %>%
+  left_join(metadata_stats %>% select(Sample, State, Water_body_type), by = c("SampleID" = "Sample")) %>%
+  rename(Taxon_Clean = Taxa)
+
+taxa_mayores_1 <- df_long %>%
+  group_by(Taxonomic_Rank, Taxon_Clean) %>%
+  summarise(Mean_Relative_Abundance = mean(Relative_Abundance, na.rm = TRUE), .groups = "drop") %>%
+  filter(Mean_Relative_Abundance > 1) %>%
+  mutate(Nombre_Final = Taxon_Clean)
+
+df_top_1_percent <- df_long %>%
+  inner_join(taxa_mayores_1 %>% select(Taxonomic_Rank, Taxon_Clean, Nombre_Final), 
+             by = c("Taxonomic_Rank", "Taxon_Clean"))
+
+df_wide_samples <- df_top_1_percent %>%
+  select(SampleID, State, Water_body_type, Nombre_Final, Relative_Abundance) %>%
+  pivot_wider(names_from = Nombre_Final, values_from = Relative_Abundance, values_fill = 0)
+
+metadata_df <- df_wide_samples %>% select(SampleID, State, Water_body_type)
+abundance_matrix <- df_wide_samples %>% select(-SampleID, -State, -Water_body_type)
+
+pseudo_count <- 1e-5
+abundance_matrix[abundance_matrix == 0] <- pseudo_count
+
+calcular_clr <- function(matriz) {
+  log_mat <- log(matriz)
+  medias_log <- rowMeans(log_mat)
+  sweep(log_mat, 1, medias_log, "-")
+}
+
+clr_matrix <- as.data.frame(calcular_clr(abundance_matrix))
+
+df_clr_long <- bind_cols(metadata_df, clr_matrix) %>%
+  pivot_longer(
+    cols = -c(SampleID, State, Water_body_type), 
+    names_to = "Nombre_Final", 
+    values_to = "CLR_Abundance"
+  )
+
+kw_results <- df_clr_long %>%
+  group_by(Nombre_Final) %>%
+  summarise(
+    p_value_State = kruskal.test(CLR_Abundance ~ as.factor(State))$p.value,
+    p_value_WaterBody = kruskal.test(CLR_Abundance ~ as.factor(Water_body_type))$p.value,
+    .groups = "drop"
+  ) %>%
+  left_join(taxa_mayores_1 %>% select(Nombre_Final, Taxonomic_Rank), by = "Nombre_Final") %>%
+  mutate(
+    p_adj_State = p.adjust(p_value_State, method = "fdr"),
+    p_adj_WaterBody = p.adjust(p_value_WaterBody, method = "fdr"),
+    P_adj_Formatted_State = ifelse(p_adj_State < 0.05, paste0(sprintf("%.3f", p_adj_State), "*"), sprintf("%.3f", p_adj_State)),
+    P_adj_Formatted_WaterBody = ifelse(p_adj_WaterBody < 0.05, paste0(sprintf("%.3f", p_adj_WaterBody), "*"), sprintf("%.3f", p_adj_WaterBody))
+  )
+
+mean_state <- df_clr_long %>%
+  group_by(Nombre_Final, State) %>%
+  summarise(Mean_CLR = round(mean(CLR_Abundance), 2), .groups = "drop") %>%
+  pivot_wider(names_from = State, values_from = Mean_CLR, names_prefix = "State_")
+
+mean_waterbody <- df_clr_long %>%
+  group_by(Nombre_Final, Water_body_type) %>%
+  summarise(Mean_CLR = round(mean(CLR_Abundance), 2), .groups = "drop") %>%
+  pivot_wider(names_from = Water_body_type, values_from = Mean_CLR, names_prefix = "WBT_")
+
+tabla_maestra <- kw_results %>%
+  left_join(mean_state, by = "Nombre_Final") %>%
+  left_join(mean_waterbody, by = "Nombre_Final") %>%
+  select(
+    Taxonomic_Rank,
+    Taxa = Nombre_Final,
+    `Kruskal-Wallis P-adj (State)` = P_adj_Formatted_State,
+    `Mexico City` = `State_Mexico City`,
+    Morelos = State_Morelos,
+    `State of Mexico` = `State_State of Mexico`,
+    Tlaxcala = State_Tlaxcala,
+    `Kruskal-Wallis P-adj (Water body type)` = P_adj_Formatted_WaterBody,
+    Lentic = WBT_Lentic,
+    Lotic = WBT_Lotic
+  )
+
+tabla_generos <- tabla_maestra %>% filter(Taxonomic_Rank == "Genus") %>% select(-Taxonomic_Rank) %>% arrange(Taxa)
+tabla_especies <- tabla_maestra %>% filter(Taxonomic_Rank == "Species") %>% select(-Taxonomic_Rank) %>% arrange(Taxa)
+
+write.csv(tabla_generos, "KW_Genera_Table_Mayor1Pct_State_WBT.csv", row.names = FALSE, na = "")
+write.csv(tabla_especies, "KW_Species_Table_Mayor1Pct_State_WBT.csv", row.names = FALSE, na = "")
+```
+
+<hr>
+
+# Rarefaction, Alpha, and Beta Diversity (Genus and Species Levels)
+
+This section evaluates sequencing depth sufficiency via rarefaction curves and characterizes within-sample (alpha) and between-sample (beta) bacterial diversity across states and water body types (lentic vs. lotic) at both Genus and Species levels.
+
+## Rarefaction Curves and Sequencing Depth Assessment
+
+```{r rarefaction-curves, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/ABUNDANCIA_ULTIMA")
+
+metadata <- read_tsv("metadatos_saida_ultimos.txt", show_col_types = FALSE)
+
+config_analisis <- list(
+  list(nivel = "Genus",   archivo = "Abundancia_Absoluta_31_Genus.csv"),
+  list(nivel = "Species", archivo = "Abundancia_Absoluta_31_Species.csv")
+)
+
+dir_rarefaccion <- "results_Rarefaction_State_WaterType"
+if (!dir.exists(dir_rarefaccion)) dir.create(dir_rarefaccion)
+
+COMMON_DEPTH    <- 50000 
+FUENTE_GRAFICOS <- "sans"
+
+for (item in config_analisis) {
+  nivel   <- item$nivel
+  archivo <- item$archivo
+  sep_char <- if (grepl("\\.csv$", archivo)) "," else "\t"
+  
+  if (!file.exists(archivo)) {
+    warning(paste("File", archivo, "not found. Skipping..."))
+    next
+  }
+  
+  tabla_conteos <- read.table(archivo, header = TRUE, row.names = 1, sep = sep_char, check.names = FALSE)
+  matriz_comunidad <- round(t(tabla_conteos))
+  
+  if (nrow(matriz_comunidad) == 0) next
+  
+  rarefaccion_list <- rarecurve(matriz_comunidad, step = 100, label = FALSE)
+  
+  rare_df <- purrr::imap_dfr(rarefaccion_list, function(curve, idx) {
+    data.frame(
+      Original_Sample = rownames(matriz_comunidad)[idx], 
+      Reads = attr(curve, "Subsample"), 
+      Taxa = as.numeric(curve)
+    )
+  }) %>%
+    mutate(
+      Sample = trimws(gsub("\\..*", "", Original_Sample)),
+      Sample_Short = ifelse(
+        grepl("^[A-Za-z]+_[0-9]+", Sample),
+        paste0(
+          sub("^([A-Za-z]+)_.*", "\\1", Sample), 
+          as.numeric(sub("^[A-Za-z]+_([0-9]+)_.*", "\\1", Sample)) 
+        ),
+        Sample 
+      )
+    ) %>%
+    left_join(metadata, by = c("Sample" = "Sample"))
+  
+  plot_rare <- ggplot(rare_df, aes(x = Reads, y = Taxa, group = Sample_Short, color = Sample_Short)) +
+    geom_line(linewidth = 0.6, alpha = 0.85) +
+    facet_wrap(~ State + `Water body type`, scales = "free_x") + 
+    labs(
+      title = paste("Rarefaction Curves by State & Water Body Type -", nivel), 
+      x = "Sequencing Depth (Reads)", 
+      y = paste0("Observed Taxa (", nivel, ")"),
+      color = "Sample name"
+    ) +
+    theme_bw(base_size = 9, base_family = FUENTE_GRAFICOS) + 
+    theme(
+      legend.position = "bottom",
+      legend.key.size = unit(0.3, "cm"),          
+      legend.text = element_text(size = 7, family = FUENTE_GRAFICOS),      
+      legend.title = element_text(size = 8, face = "bold", family = FUENTE_GRAFICOS),
+      plot.title = element_text(size = 11, face = "bold", hjust = 0.5, family = FUENTE_GRAFICOS),
+      axis.title = element_text(size = 9, face = "bold", family = FUENTE_GRAFICOS),
+      axis.text.y = element_text(size = 6.5, color = "black", family = FUENTE_GRAFICOS),
+      axis.text.x = element_text(size = 6.5, color = "black", family = FUENTE_GRAFICOS, angle = 30, hjust = 1),
+      strip.background = element_rect(fill = "#f4ebd8", color = "#333333"),
+      strip.text = element_text(face = "bold", size = 8.5, family = FUENTE_GRAFICOS),
+      panel.grid.minor = element_blank()
+    ) +
+    guides(color = guide_legend(ncol = 10))
+  
+  ggsave(
+    filename = paste0(dir_rarefaccion, "/Rarefaction_State_WaterType_", nivel, ".tiff"), 
+    plot = plot_rare, width = 9.0, height = 7.0, dpi = 500, compression = "lzw", device = "tiff"
+  )
+  
+  tabla_resumen <- rare_df %>%
+    group_by(Sample_Short, State, `Water body type`) %>%
+    filter(Reads <= max(Reads)) %>% 
+    summarise(
+      Max_Reads = max(Reads),
+      Observed_Taxa_Max = max(Taxa),
+      Taxa_at_50k = if (max(Reads) >= COMMON_DEPTH) approx(Reads, Taxa, xout = COMMON_DEPTH)$y else NA,
+      .groups = "drop"
+    ) %>%
+    mutate(Taxa_at_50k = round(Taxa_at_50k, 0))
+  
+  write.csv(tabla_resumen, paste0(dir_rarefaccion, "/Summary_State_WaterType_", nivel, ".csv"), row.names = FALSE)
+}
+```
+
+## Genus-Level Alpha Diversity, Beta Diversity, and Differential Analysis
+
+```{r genus-alpha-beta-diversity, eval=FALSE}
+GRAPHICS_FONT      <- "sans"   
+TITLE_FONT_SIZE    <- 12     
+SUBTITLE_FONT_SIZE <- 11       
+AXIS_FONT_SIZE     <- 9        
+TICK_FONT_SIZE     <- 9      
+
+base_dir <- "/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/DIVERSIDAD_GENERO_WILCOXON"
+if (!dir.exists(base_dir)) dir.create(base_dir, recursive = TRUE)
+setwd(base_dir)
+
+dir_alpha <- file.path(base_dir, "results_Alpha2")
+dir_beta  <- file.path(base_dir, "results_Beta2")
+dir_multi <- file.path(base_dir, "results_Multivariate2")
+
+if (!dir.exists(dir_alpha)) dir.create(dir_alpha, recursive = TRUE)
+if (!dir.exists(dir_beta))  dir.create(dir_beta, recursive = TRUE)
+if (!dir.exists(dir_multi)) dir.create(dir_multi, recursive = TRUE)
+
+palette_water_body_type <- c("Lentic" = "#E41A1C", "Lotic" = "#8FBC8F")
+palette_state           <- c("Mexico City" = "#66C2A5", "Morelos" = "#8DA0CB", "State of Mexico" = "#E6AB02", "Tlaxcala" = "#800080")
+
+rel_abund_table <- read.csv("../ABUNDANCIA_ULTIMA/Abundancia_Relativa_31_Genus2.csv", header = TRUE, row.names = 1, check.names = FALSE)
+metadata_raw    <- read_tsv("../ABUNDANCIA_ULTIMA/metadatos_saida_ultimos2.txt", col_names = TRUE, show_col_types = FALSE)
+
+metadata_stats <- as.data.frame(metadata_raw)
+colnames(metadata_stats) <- trimws(gsub("[\"']", "", colnames(metadata_stats)))
+if (!"Sample" %in% colnames(metadata_stats)) colnames(metadata_stats)[1] <- "Sample"
+
+metadata_stats$Sample <- trimws(as.character(metadata_stats$Sample))
+metadata_stats$State  <- trimws(as.character(metadata_stats$State))
+
+if ("Water body type" %in% colnames(metadata_stats) && !"Water_body_type" %in% colnames(metadata_stats)) {
+  metadata_stats$Water_body_type <- trimws(as.character(metadata_stats[["Water body type"]]))
+} else if ("Water_body_type" %in% colnames(metadata_stats)) {
+  metadata_stats$Water_body_type <- trimws(as.character(metadata_stats$Water_body_type))
+}
+
+common_samples <- intersect(metadata_stats$Sample, colnames(rel_abund_table))
+metadata_stats <- metadata_stats %>% filter(Sample %in% common_samples) %>% arrange(Sample)
+metadata_stats$State           <- factor(metadata_stats$State)
+metadata_stats$Water_body_type <- factor(metadata_stats$Water_body_type)
+
+variables_of_interest <- c("State", "Water_body_type")
+metadata_stats <- metadata_stats %>% select(Sample, all_of(variables_of_interest))
+community_matrix <- t(rel_abund_table[, metadata_stats$Sample])
+
+sink(paste0(dir_multi, "/Consolidated_Statistical_Report_Genus_Wilcoxon.txt"))
+cat("=====================================================================\n")
+cat("    INFERENTIAL STATISTICS REPORT (GENUS) - WILCOXON POST-HOC        \n")
+cat("=====================================================================\n\n")
+
+alpha_div <- data.frame(
+  Sample   = rownames(community_matrix),
+  Shannon  = vegan::diversity(community_matrix, index = "shannon"),
+  Observed = vegan::specnumber(community_matrix) 
+) %>% left_join(metadata_stats, by = "Sample")
+
+alpha_div_long <- alpha_div %>% 
+  select(Sample, Shannon, Observed) %>% 
+  rename(`Sample Name` = Sample) %>% 
+  pivot_longer(cols = c(Shannon, Observed), names_to = "Metric", values_to = "Value")
+
+write.csv(alpha_div_long, paste0(dir_alpha, "/Table_Article_Alpha_Values_Genus_Long.csv"), row.names = FALSE) 
+alpha_results_table <- data.frame()
+
+for (var in variables_of_interest) {
+  current_palette <- if (var == "Water_body_type") palette_water_body_type else palette_state
+  if (length(levels(alpha_div[[var]])) < 2) next
+  
+  for (index_name in c("Shannon", "Observed")) {
+    form <- as.formula(paste(index_name, "~", var))
+    kw_res <- kruskal.test(form, data = alpha_div)
+    
+    alpha_results_table <- rbind(alpha_results_table, data.frame(Variable = var, Index = index_name, KW_p_value = kw_res$p.value))
+    cat(sprintf("\n[%s - %s] Kruskal-Wallis p-value: %.5f\n", var, index_name, kw_res$p.value))
+    
+    if (kw_res$p.value < 0.05) {
+      cat(sprintf("--- Post-hoc Wilcoxon Test (BH adjusted) for %s by %s ---\n", index_name, var))
+      pw_alpha <- pairwise.wilcox.test(alpha_div[[index_name]], alpha_div[[var]], p.adjust.method = "BH", exact = FALSE)
+      print(pw_alpha$p.value)
+    }
+    
+    p_val_label <- if (kw_res$p.value < 0.001) "p < 0.001" else paste0("p = ", round(kw_res$p.value, 4))
+    alpha_subtitle <- paste("Kruskal-Wallis:", p_val_label, "| Wilcoxon Post-hoc")
+    
+    alpha_plot <- ggplot(alpha_div, aes(x = .data[[var]], y = .data[[index_name]], fill = .data[[var]])) +
+      geom_boxplot(alpha = 0.7, outlier.shape = NA, color = "#333333") +
+      geom_jitter(width = 0.2, size = 2.5, alpha = 0.8, shape = 21, color = "black") +
+      labs(
+        title = paste0("Alpha Diversity (", index_name, ") by ", ifelse(var == "State", "State", "Water Body Type"), "\n(Taxonomic Level: Genus)"),
+        subtitle = alpha_subtitle,
+        x = "", y = ifelse(index_name == "Observed", "Observed Genera", "Shannon Index")
+      ) +
+      theme_bw(base_size = AXIS_FONT_SIZE, base_family = GRAPHICS_FONT) +
+      theme(
+        legend.position = "none",
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold", size = TITLE_FONT_SIZE, family = GRAPHICS_FONT, hjust = 0.5),
+        plot.subtitle = element_text(face = "italic", color = "#555555", size = SUBTITLE_FONT_SIZE, family = GRAPHICS_FONT, hjust = 0.5),
+        axis.title = element_text(face = "bold", size = AXIS_FONT_SIZE, family = GRAPHICS_FONT),
+        axis.text = element_text(color = "black", size = TICK_FONT_SIZE, family = GRAPHICS_FONT),
+        axis.text.x = element_text(face = "bold"),
+        plot.margin = margin(t = 20, r = 10, b = 10, l = 10, unit = "pt")
+      ) +   
+      scale_fill_manual(values = current_palette, drop = FALSE) 
+    
+    ggsave(paste0(dir_alpha, "/Figure_AlphaDiv_", index_name, "_", var, "_Genus.pdf"), plot = alpha_plot, width = 5.5, height = 5.2, device = "pdf")
+    ggsave(paste0(dir_alpha, "/Figure_AlphaDiv_", index_name, "_", var, "_Genus.png"), plot = alpha_plot, width = 5.5, height = 5.2, dpi = 300)
+    ggsave(paste0(dir_alpha, "/Figure_AlphaDiv_", index_name, "_", var, "_Genus.tiff"), plot = alpha_plot, width = 5.5, height = 5.2, dpi = 500, compression = "lzw")
+  }
+}
+write.csv(alpha_results_table, paste0(dir_alpha, "/Table_Article_Alpha_Statistics_Genus_Wilcoxon.csv"), row.names = FALSE)
+
+bray_dist <- vegdist(community_matrix, method = "bray")
+bray_df   <- as.data.frame(as.matrix(bray_dist)) %>% rownames_to_column("Sample Name")
+write.csv(bray_df, paste0(dir_beta, "/Table_Article_BrayCurtis_Matrix_Genus.csv"), row.names = FALSE)
+
+upgma_hc <- hclust(bray_dist, method = "average")
+
+pdf(file = paste0(dir_beta, "/Figure_UPGMA_BrayCurtis_Genus.pdf"), width = 10, height = 6)
+plot(upgma_hc, main = "UPGMA Clustering (Bray-Curtis Distance)\n(Taxonomic Level: Genus)", xlab = "Sample name", sub = "", ylab = "Height (Bray-Curtis Distance)", cex = 0.8)
+dev.off()
+
+png(filename = paste0(dir_beta, "/Figure_UPGMA_BrayCurtis_Genus.png"), width = 10, height = 6, units = "in", res = 300)
+plot(upgma_hc, main = "UPGMA Clustering (Bray-Curtis Distance)\n(Taxonomic Level: Genus)", xlab = "Sample name", sub = "", ylab = "Height (Bray-Curtis Distance)", cex = 0.8)
+dev.off()
+
+tiff(filename = paste0(dir_beta, "/Figure_UPGMA_BrayCurtis_Genus.tiff"), width = 10, height = 6, units = "in", res = 500, compression = "lzw")
+plot(upgma_hc, main = "UPGMA Clustering (Bray-Curtis Distance)\n(Taxonomic Level: Genus)", xlab = "Sample name", sub = "", ylab = "Height (Bray-Curtis Distance)", cex = 0.8)
+dev.off()
+
+pcoa_calc <- cmdscale(bray_dist, k = 2, eig = TRUE)
+pcoa_coords <- data.frame(Sample = rownames(community_matrix), PCoA1 = pcoa_calc$points[, 1], PCoA2 = pcoa_calc$points[, 2]) %>% 
+  left_join(metadata_stats, by = "Sample") %>% 
+  select(Sample, everything()) %>% 
+  rename(`Sample Name` = Sample)
+
+positive_eigenvalues <- pcoa_calc$eig[pcoa_calc$eig > 0]
+var_explained_pc1 <- round(100 * (positive_eigenvalues[1] / sum(positive_eigenvalues)), 1)
+var_explained_pc2 <- round(100 * (positive_eigenvalues[2] / sum(positive_eigenvalues)), 1)
+
+permanova_combined <- data.frame()
+permdisp_combined  <- data.frame()
+
+for (var in variables_of_interest) {
+  current_palette <- if (var == "Water_body_type") palette_water_body_type else palette_state
+  if (length(levels(metadata_stats[[var]])) < 2) next
+  
+  formula_perm  <- as.formula(paste("bray_dist ~", var))
+  permanova_res <- adonis2(formula_perm, data = metadata_stats, permutations = 999)
+  
+  perm_df <- as.data.frame(permanova_res) %>% rownames_to_column("Term") %>% mutate(Variable = var) %>% select(Variable, everything())
+  permanova_combined <- bind_rows(permanova_combined, perm_df)
+  
+  perm_disp      <- betadisper(bray_dist, group = metadata_stats[[var]])
+  perm_disp_pval <- permutest(perm_disp, permutations = 999)
+  
+  disp_df <- as.data.frame(perm_disp_pval$tab) %>% rownames_to_column("Source") %>% mutate(Variable = var) %>% select(Variable, everything())
+  permdisp_combined <- bind_rows(permdisp_combined, disp_df)
+  
+  dynamic_r2   <- round(permanova_res$R2[1], 3) 
+  p_permanova  <- permanova_res$`Pr(>F)`[1]
+  perm_p_label <- if (p_permanova <= 0.001) "p <= 0.001" else paste0("p = ", round(p_permanova, 3))
+  figure_subtitle <- bquote(paste("PERMANOVA: ", R^2, " = ", .(dynamic_r2), " (", .(perm_p_label), ") | PERMDISP: ", p, " = ", .(round(perm_disp_pval$tab$`Pr(>F)`[1], 3))))
+  
+  pcoa_plot <- ggplot(pcoa_coords, aes(x = PCoA1, y = PCoA2, color = .data[[var]], fill = .data[[var]])) +
+    stat_ellipse(geom = "polygon", alpha = 0.08, linetype = "dashed", size = 0.5, level = 0.95, show.legend = FALSE) +
+    geom_point(size = 3.8, alpha = 0.85, shape = 21, stroke = 0.4, color = "black") +
+    labs(
+      x = paste0("PCoA1 (Bray-Curtis: ", var_explained_pc1, "%)"), 
+      y = paste0("PCoA2 (Bray-Curtis: ", var_explained_pc2, "%)"), 
+      title = paste0("PCoA (Bray-Curtis) by ", ifelse(var == "State", "State", "Water Body Type"), "\n(Taxonomic Level: Genus)"), 
+      subtitle = figure_subtitle
+    ) +
+    theme_bw(base_size = AXIS_FONT_SIZE, base_family = GRAPHICS_FONT) +
+    theme(
+      panel.grid.minor = element_blank(), 
+      plot.title = element_text(face = "bold", size = TITLE_FONT_SIZE, hjust = 0.5), 
+      plot.subtitle = element_text(size = SUBTITLE_FONT_SIZE, face = "italic", hjust = 0.5), 
+      legend.background = element_blank(),
+      plot.margin = margin(t = 20, r = 10, b = 10, l = 10, unit = "pt")
+    ) +
+    scale_fill_manual(values = current_palette, drop = FALSE) 
+  
+  ggsave(filename = paste0(dir_beta, "/Figure_PCoA_BrayCurtis_", var, "_Genus.pdf"), plot = pcoa_plot, width = 7.5, height = 6.0, device = "pdf")
+  ggsave(filename = paste0(dir_beta, "/Figure_PCoA_BrayCurtis_", var, "_Genus.png"), plot = pcoa_plot, width = 7.5, height = 6.0, dpi = 300)
+  ggsave(filename = paste0(dir_beta, "/Figure_PCoA_BrayCurtis_", var, "_Genus.tiff"), plot = pcoa_plot, width = 7.5, height = 6.0, dpi = 500, compression = "lzw")
+}
+
+write.csv(permanova_combined, paste0(dir_multi, "/Table_Article_PERMANOVA_Combined_Genus.csv"), row.names = FALSE)
+write.csv(permdisp_combined, paste0(dir_multi, "/Table_Article_PERMDISP_Combined_Genus.csv"), row.names = FALSE)
+
+mean_abund_per_taxa  <- colMeans(community_matrix)
+taxa_greater_1_names <- names(mean_abund_per_taxa[mean_abund_per_taxa > 1])
+
+if (length(taxa_greater_1_names) == 0) {
+  stop("ALERT: No taxon meets the > 1% abundance filter.")
+}
+
+taxa_1pct_matrix <- as.data.frame(community_matrix[, taxa_greater_1_names, drop = FALSE]) %>% 
+  rownames_to_column("Sample") %>% 
+  left_join(metadata_stats, by = "Sample") %>% 
+  select(Sample, everything()) %>% 
+  rename(`Sample Name` = Sample)
+
+post_hoc_table <- data.frame()
+kw_combined    <- data.frame()
+
+for (var in variables_of_interest) {
+  if (length(levels(taxa_1pct_matrix[[var]])) < 2) next
+  
+  adj_pvals_table <- data.frame(Genus = character(), Kw_p_val = numeric(), stringsAsFactors = FALSE)
+  for (genus in taxa_greater_1_names) {
+    formula_kw <- as.formula(paste(paste0("`", genus, "`"), "~", var))
+    kw_test    <- kruskal.test(formula_kw, data = taxa_1pct_matrix)
+    adj_pvals_table <- rbind(adj_pvals_table, data.frame(Genus = genus, Kw_p_val = kw_test$p.value))
+  }
+  
+  adj_pvals_table$Kw_p_adj <- p.adjust(adj_pvals_table$Kw_p_val, method = "BH")
+  kw_df <- adj_pvals_table %>% arrange(Kw_p_adj) %>% mutate(Variable = var) %>% select(Variable, everything())
+  kw_combined <- bind_rows(kw_combined, kw_df)
+  
+  significant_genera <- adj_pvals_table$Genus[adj_pvals_table$Kw_p_adj < 0.05]
+  if (length(significant_genera) > 0) {
+    for (genus in significant_genera) {
+      pw_test <- pairwise.wilcox.test(taxa_1pct_matrix[[genus]], taxa_1pct_matrix[[var]], p.adjust.method = "BH", exact = FALSE)
+      p_mat   <- pw_test$p.value
+      
+      if (!is.null(p_mat)) {
+        p_vals_melt <- na.omit(reshape2::melt(p_mat))
+        if (nrow(p_vals_melt) > 0) {
+          p_vec <- p_vals_melt$value
+          names(p_vec) <- paste0(p_vals_melt$Var1, "-", p_vals_melt$Var2)
+          
+          cld_letters <- NULL
+          tryCatch({ cld_letters <- multcompView::multcompLetters(p_vec)$Letters }, error = function(e) {})
+          
+          for (k in 1:nrow(p_vals_melt)) {
+            g1 <- as.character(p_vals_melt$Var1[k])
+            g2 <- as.character(p_vals_melt$Var2[k])
+            padj_val  <- p_vals_melt$value[k]
+            letter_g1 <- if (!is.null(cld_letters) && g1 %in% names(cld_letters)) cld_letters[g1] else ""
+            letter_g2 <- if (!is.null(cld_letters) && g2 %in% names(cld_letters)) cld_letters[g2] else ""
+            cld_format <- if (letter_g1 != "" && letter_g2 != "") paste0(letter_g1, " / ", letter_g2) else "-"
+            
+            post_hoc_table <- bind_rows(post_hoc_table, data.frame(
+              Taxonomic_Level     = "Genus",
+              Taxon               = genus,
+              Evaluation_Variable = var,
+              Group_Comparison    = paste0(g1, " vs ", g2),
+              P_adjusted_FDR      = padj_val,
+              CLD                 = cld_format,
+              stringsAsFactors    = FALSE
+            ))
+          }
+        }
+      }
+    }
+  }
+}
+
+write.csv(kw_combined, paste0(dir_multi, "/Table_Article_Genus1Pct_KruskalWallis_Wilcoxon_Combined.csv"), row.names = FALSE)
+write.csv(post_hoc_table, paste0(dir_multi, "/Post_hoc_pairwise_Genus.csv"), row.names = FALSE)
+sink()
+```
+
+### Assembly of Figure 4 (Alpha Diversity - Genus) and Figure 5 (PCoA - Genus)
+
+```{r figure-4-and-5-assembly, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/DIVERSIDAD_GENERO_WILCOXON/results_Alpha2")
+
+img_A_raw <- readTIFF("Figure_AlphaDiv_Observed_State_Genus.tiff")
+img_B_raw <- readTIFF("Figure_AlphaDiv_Observed_Water_body_type_Genus.tiff")
+img_C_raw <- readTIFF("Figure_AlphaDiv_Shannon_State_Genus.tiff")
+img_D_raw <- readTIFF("Figure_AlphaDiv_Shannon_Water_body_type_Genus.tiff")
+
+grob_A <- rasterGrob(img_A_raw, interpolate = TRUE)
+grob_B <- rasterGrob(img_B_raw, interpolate = TRUE)
+grob_C <- rasterGrob(img_C_raw, interpolate = TRUE)
+grob_D <- rasterGrob(img_D_raw, interpolate = TRUE)
+
+tema_alpha_pub <- theme(
+  text = element_text(family = "sans"),
+  plot.tag = element_text(size = 28, face = "bold", family = "sans"),
+  plot.tag.position = c(0.06, 0.94) 
+)
+
+pA <- ggplot() + annotation_custom(grob_A, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "A") + tema_alpha_pub
+pB <- ggplot() + annotation_custom(grob_B, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "B") + tema_alpha_pub
+pC <- ggplot() + annotation_custom(grob_C, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "C") + tema_alpha_pub
+pD <- ggplot() + annotation_custom(grob_D, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "D") + tema_alpha_pub
+
+for (lbl in c("A", "B", "C", "D")) {
+  plt <- get(paste0("p", lbl))
+  ggsave(paste0("Figure_4", lbl, ".tiff"), plot = plt, width = 11, height = 10, dpi = 500, compression = "lzw")
+  ggsave(paste0("Figure_4", lbl, ".pdf"),  plot = plt, width = 11, height = 10, device = "pdf")
+}
+
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/DIVERSIDAD_GENERO_WILCOXON/results_Beta2")
+
+img_5A_raw <- readTIFF("Figure_PCoA_BrayCurtis_State_Genus.tiff")
+img_5B_raw <- readTIFF("Figure_PCoA_BrayCurtis_Water_body_type_Genus.tiff")
+
+grob_5A <- rasterGrob(img_5A_raw, interpolate = TRUE)
+grob_5B <- rasterGrob(img_5B_raw, interpolate = TRUE)
+
+tema_pcoa_pub <- theme(
+  text = element_text(family = "sans"),
+  plot.tag = element_text(size = 28, face = "bold", family = "sans"),
+  plot.tag.position = c(0.02, 0.93) 
+)
+
+p5A <- ggplot() + annotation_custom(grob_5A, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "A") + tema_pcoa_pub
+p5B <- ggplot() + annotation_custom(grob_5B, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "B") + tema_pcoa_pub
+
+ggsave("Figure_5A.tiff", plot = p5A, width = 11, height = 8.8, dpi = 500, compression = "lzw")
+ggsave("Figure_5A.pdf",  plot = p5A, width = 11, height = 8.8, device = "pdf")
+ggsave("Figure_5B.tiff", plot = p5B, width = 11, height = 8.8, dpi = 500, compression = "lzw")
+ggsave("Figure_5B.pdf",  plot = p5B, width = 11, height = 8.8, device = "pdf")
+```
+
+## Species-Level Alpha Diversity, Beta Diversity, and Differential Analysis
+
+```{r species-alpha-beta-diversity, eval=FALSE}
+base_dir_sp <- "/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/DIVERSIDAD_ESPECIE_WILCOXON" 
+if (!dir.exists(base_dir_sp)) dir.create(base_dir_sp, recursive = TRUE) 
+setwd(base_dir_sp) 
+
+dir_alpha_sp <- file.path(base_dir_sp, "results_Alpha3") 
+dir_beta_sp  <- file.path(base_dir_sp, "results_Beta3") 
+dir_multi_sp <- file.path(base_dir_sp, "results_Multivariate3") 
+
+if (!dir.exists(dir_alpha_sp)) dir.create(dir_alpha_sp, recursive = TRUE) 
+if (!dir.exists(dir_beta_sp))  dir.create(dir_beta_sp, recursive = TRUE) 
+if (!dir.exists(dir_multi_sp)) dir.create(dir_multi_sp, recursive = TRUE) 
+
+rel_abund_table_sp <- read.csv("../ABUNDANCIA_ULTIMA/Abundancia_Relativa_31_Species2.csv", header = TRUE, row.names = 1, check.names = FALSE) 
+metadata_raw_sp    <- read_tsv("../ABUNDANCIA_ULTIMA/metadatos_saida_ultimos2.txt", col_names = TRUE, show_col_types = FALSE) 
+
+metadata_stats_sp <- as.data.frame(metadata_raw_sp) 
+colnames(metadata_stats_sp) <- trimws(gsub("[\"']", "", colnames(metadata_stats_sp))) 
+if (!"Sample" %in% colnames(metadata_stats_sp)) colnames(metadata_stats_sp)[1] <- "Sample" 
+
+metadata_stats_sp$Sample <- trimws(as.character(metadata_stats_sp$Sample)) 
+metadata_stats_sp$State  <- trimws(as.character(metadata_stats_sp$State)) 
+
+if ("Water body type" %in% colnames(metadata_stats_sp) && !"Water_body_type" %in% colnames(metadata_stats_sp)) { 
+  metadata_stats_sp$Water_body_type <- trimws(as.character(metadata_stats_sp[["Water body type"]])) 
+} else if ("Water_body_type" %in% colnames(metadata_stats_sp)) { 
+  metadata_stats_sp$Water_body_type <- trimws(as.character(metadata_stats_sp$Water_body_type)) 
+} 
+
+common_samples_sp <- intersect(metadata_stats_sp$Sample, colnames(rel_abund_table_sp)) 
+metadata_stats_sp <- metadata_stats_sp %>% filter(Sample %in% common_samples_sp) %>% arrange(Sample) 
+metadata_stats_sp$State           <- factor(metadata_stats_sp$State) 
+metadata_stats_sp$Water_body_type <- factor(metadata_stats_sp$Water_body_type) 
+
+metadata_stats_sp <- metadata_stats_sp %>% select(Sample, all_of(variables_of_interest))
+community_matrix_sp <- t(rel_abund_table_sp[, metadata_stats_sp$Sample]) 
+
+sink(paste0(dir_multi_sp, "/Consolidated_Statistical_Report_Species_Wilcoxon.txt")) 
+cat("=====================================================================\n") 
+cat("    INFERENTIAL STATISTICS REPORT (SPECIES) - WILCOXON POST-HOC       \n") 
+cat("=====================================================================\n\n") 
+
+alpha_div_sp <- data.frame( 
+  Sample   = rownames(community_matrix_sp), 
+  Shannon  = vegan::diversity(community_matrix_sp, index = "shannon"), 
+  Observed = vegan::specnumber(community_matrix_sp)  
+) %>% left_join(metadata_stats_sp, by = "Sample") 
+
+alpha_div_long_sp <- alpha_div_sp %>% 
+  select(Sample, Shannon, Observed) %>% 
+  rename(`Sample Name` = Sample) %>% 
+  pivot_longer(cols = c(Shannon, Observed), names_to = "Metric", values_to = "Value")
+
+write.csv(alpha_div_long_sp, paste0(dir_alpha_sp, "/Table_Article_Alpha_Values_Species_Long.csv"), row.names = FALSE) 
+alpha_results_table_sp <- data.frame() 
+
+for (var in variables_of_interest) { 
+  current_palette <- if (var == "Water_body_type") palette_water_body_type else palette_state 
+  if (length(levels(alpha_div_sp[[var]])) < 2) next 
+  
+  for (index_name in c("Shannon", "Observed")) { 
+    form   <- as.formula(paste(index_name, "~", var)) 
+    kw_res <- kruskal.test(form, data = alpha_div_sp) 
+    
+    alpha_results_table_sp <- rbind(alpha_results_table_sp, data.frame(Variable = var, Index = index_name, KW_p_value = kw_res$p.value)) 
+    
+    if (kw_res$p.value < 0.05) { 
+      pw_alpha <- pairwise.wilcox.test(alpha_div_sp[[index_name]], alpha_div_sp[[var]], p.adjust.method = "BH", exact = FALSE) 
+      print(pw_alpha$p.value) 
+    } 
+    
+    p_val_label    <- if (kw_res$p.value < 0.001) "p < 0.001" else paste0("p = ", round(kw_res$p.value, 4)) 
+    alpha_subtitle <- paste("Kruskal-Wallis:", p_val_label, "| Wilcoxon Post-hoc") 
+    
+    alpha_plot <- ggplot(alpha_div_sp, aes(x = .data[[var]], y = .data[[index_name]], fill = .data[[var]])) + 
+      geom_boxplot(alpha = 0.7, outlier.shape = NA, color = "#333333") + 
+      geom_jitter(width = 0.2, size = 2.5, alpha = 0.8, shape = 21, color = "black") + 
+      labs( 
+        title = paste0("Alpha Diversity (", index_name, ") by ", ifelse(var == "State", "State", "Water Body Type"), "\n(Taxonomic Level: Species)"), 
+        subtitle = alpha_subtitle, 
+        x = "", y = ifelse(index_name == "Observed", "Observed Species", "Shannon Index") 
+      ) + 
+      theme_bw(base_size = AXIS_FONT_SIZE, base_family = GRAPHICS_FONT) + 
+      theme( 
+        legend.position = "none", 
+        panel.grid.minor = element_blank(), 
+        plot.title = element_text(face = "bold", size = TITLE_FONT_SIZE, family = GRAPHICS_FONT, hjust = 0.5), 
+        plot.subtitle = element_text(face = "italic", color = "#555555", size = SUBTITLE_FONT_SIZE, family = GRAPHICS_FONT, hjust = 0.5), 
+        axis.title = element_text(face = "bold", size = AXIS_FONT_SIZE, family = GRAPHICS_FONT), 
+        axis.text = element_text(color = "black", size = TICK_FONT_SIZE, family = GRAPHICS_FONT), 
+        axis.text.x = element_text(face = "bold"), 
+        plot.margin = margin(t = 20, r = 10, b = 10, l = 10, unit = "pt") 
+      ) +   
+      scale_fill_manual(values = current_palette, drop = FALSE)  
+    
+    ggsave(paste0(dir_alpha_sp, "/Figure_AlphaDiv_", index_name, "_", var, "_Species.pdf"), plot = alpha_plot, width = 5.5, height = 5.2, device = "pdf") 
+    ggsave(paste0(dir_alpha_sp, "/Figure_AlphaDiv_", index_name, "_", var, "_Species.png"), plot = alpha_plot, width = 5.5, height = 5.2, dpi = 300) 
+    ggsave(paste0(dir_alpha_sp, "/Figure_AlphaDiv_", index_name, "_", var, "_Species.tiff"), plot = alpha_plot, width = 5.5, height = 5.2, dpi = 500, compression = "lzw") 
+  } 
+} 
+write.csv(alpha_results_table_sp, paste0(dir_alpha_sp, "/Table_Article_Alpha_Statistics_Species_Wilcoxon.csv"), row.names = FALSE) 
+
+bray_dist_sp <- vegdist(community_matrix_sp, method = "bray") 
+write.csv(as.matrix(bray_dist_sp), paste0(dir_beta_sp, "/Table_Article_BrayCurtis_Matrix_Species.csv"), row.names = TRUE) 
+
+upgma_hc_sp <- hclust(bray_dist_sp, method = "average") 
+
+pdf(file = paste0(dir_beta_sp, "/Figure_UPGMA_BrayCurtis_Species.pdf"), width = 10, height = 6) 
+plot(upgma_hc_sp, main = "UPGMA Clustering (Bray-Curtis Distance)\n(Taxonomic Level: Species)", xlab = "Sample name", sub = "", ylab = "Height (Bray-Curtis Distance)", cex = 0.8) 
+dev.off() 
+
+png(filename = paste0(dir_beta_sp, "/Figure_UPGMA_BrayCurtis_Species.png"), width = 10, height = 6, units = "in", res = 300) 
+plot(upgma_hc_sp, main = "UPGMA Clustering (Bray-Curtis Distance)\n(Taxonomic Level: Species)", xlab = "Sample name", sub = "", ylab = "Height (Bray-Curtis Distance)", cex = 0.8) 
+dev.off() 
+
+tiff(filename = paste0(dir_beta_sp, "/Figure_UPGMA_BrayCurtis_Species.tiff"), width = 10, height = 6, units = "in", res = 500, compression = "lzw") 
+plot(upgma_hc_sp, main = "UPGMA Clustering (Bray-Curtis Distance)\n(Taxonomic Level: Species)", xlab = "Sample name", sub = "", ylab = "Height (Bray-Curtis Distance)", cex = 0.8) 
+dev.off() 
+
+pcoa_calc_sp   <- cmdscale(bray_dist_sp, k = 2, eig = TRUE) 
+pcoa_coords_sp <- data.frame(Sample = rownames(community_matrix_sp), PCoA1 = pcoa_calc_sp$points[, 1], PCoA2 = pcoa_calc_sp$points[, 2]) %>% 
+  left_join(metadata_stats_sp, by = "Sample") %>% 
+  select(Sample, everything()) 
+
+pos_eig_sp <- pcoa_calc_sp$eig[pcoa_calc_sp$eig > 0] 
+var_exp_pc1_sp <- round(100 * (pos_eig_sp[1] / sum(pos_eig_sp)), 1) 
+var_exp_pc2_sp <- round(100 * (pos_eig_sp[2] / sum(pos_eig_sp)), 1) 
+
+permanova_combined_sp <- data.frame()
+permdisp_combined_sp  <- data.frame()
+
+for (var in variables_of_interest) { 
+  current_palette <- if (var == "Water_body_type") palette_water_body_type else palette_state 
+  if (length(levels(metadata_stats_sp[[var]])) < 2) next 
+  
+  formula_perm  <- as.formula(paste("bray_dist_sp ~", var)) 
+  permanova_res <- adonis2(formula_perm, data = metadata_stats_sp, permutations = 999) 
+  
+  perm_df <- as.data.frame(permanova_res) %>% rownames_to_column("Term") %>% mutate(Variable = var) %>% select(Variable, everything())
+  permanova_combined_sp <- bind_rows(permanova_combined_sp, perm_df)
+  
+  perm_disp      <- betadisper(bray_dist_sp, group = metadata_stats_sp[[var]]) 
+  perm_disp_pval <- permutest(perm_disp, permutations = 999) 
+  
+  disp_df <- as.data.frame(perm_disp_pval$tab) %>% rownames_to_column("Source") %>% mutate(Variable = var) %>% select(Variable, everything())
+  permdisp_combined_sp <- bind_rows(permdisp_combined_sp, disp_df)
+  
+  dynamic_r2   <- round(permanova_res$R2[1], 3) 
+  p_permanova  <- permanova_res$`Pr(>F)`[1] 
+  perm_p_label <- if (p_permanova <= 0.001) "p <= 0.001" else paste0("p = ", round(p_permanova, 3)) 
+  figure_subtitle <- bquote(paste("PERMANOVA: ", R^2, " = ", .(dynamic_r2), " (", .(perm_p_label), ") | PERMDISP: ", p, " = ", .(round(perm_disp_pval$tab$`Pr(>F)`[1], 3)))) 
+  
+  pcoa_plot <- ggplot(pcoa_coords_sp, aes(x = PCoA1, y = PCoA2, color = .data[[var]], fill = .data[[var]])) + 
+    stat_ellipse(geom = "polygon", alpha = 0.08, linetype = "dashed", size = 0.5, level = 0.95, show.legend = FALSE) + 
+    geom_point(size = 3.8, alpha = 0.85, shape = 21, stroke = 0.4, color = "black") + 
+    labs( 
+      x = paste0("PCoA1 (Bray-Curtis: ", var_exp_pc1_sp, "%)"),  
+      y = paste0("PCoA2 (Bray-Curtis: ", var_exp_pc2_sp, "%)"),  
+      title = paste0("PCoA (Bray-Curtis) by ", ifelse(var == "State", "State", "Water Body Type"), "\n(Taxonomic Level: Species)"),  
+      subtitle = figure_subtitle 
+    ) + 
+    theme_bw(base_size = AXIS_FONT_SIZE, base_family = GRAPHICS_FONT) + 
+    theme( 
+      panel.grid.minor = element_blank(),  
+      plot.title = element_text(face = "bold", size = TITLE_FONT_SIZE, hjust = 0.5),  
+      plot.subtitle = element_text(size = SUBTITLE_FONT_SIZE, face = "italic", hjust = 0.5),  
+      legend.background = element_blank(), 
+      plot.margin = margin(t = 20, r = 10, b = 10, l = 10, unit = "pt") 
+    ) + 
+    scale_fill_manual(values = current_palette, drop = FALSE)  
+  
+  ggsave(filename = paste0(dir_beta_sp, "/Figure_PCoA_BrayCurtis_", var, "_Species.pdf"), plot = pcoa_plot, width = 7.5, height = 6.0, device = "pdf") 
+  ggsave(filename = paste0(dir_beta_sp, "/Figure_PCoA_BrayCurtis_", var, "_Species.png"), plot = pcoa_plot, width = 7.5, height = 6.0, dpi = 300) 
+  ggsave(filename = paste0(dir_beta_sp, "/Figure_PCoA_BrayCurtis_", var, "_Species.tiff"), plot = pcoa_plot, width = 7.5, height = 6.0, dpi = 500, compression = "lzw") 
+} 
+
+write.csv(permanova_combined_sp, paste0(dir_multi_sp, "/Table_Article_PERMANOVA_Combined_Species.csv"), row.names = FALSE)
+write.csv(permdisp_combined_sp, paste0(dir_multi_sp, "/Table_Article_PERMDISP_Combined_Species.csv"), row.names = FALSE)
+
+mean_abund_per_taxa_sp  <- colMeans(community_matrix_sp) 
+taxa_greater_1_names_sp <- names(mean_abund_per_taxa_sp[mean_abund_per_taxa_sp > 1]) 
+taxa_1pct_matrix_sp     <- as.data.frame(community_matrix_sp[, taxa_greater_1_names_sp, drop = FALSE]) %>% 
+  rownames_to_column("Sample") %>% 
+  left_join(metadata_stats_sp, by = "Sample") %>% 
+  select(Sample, everything()) 
+
+post_hoc_table_sp <- data.frame() 
+kw_combined_sp    <- data.frame()
+
+for (var in variables_of_interest) { 
+  if (length(levels(taxa_1pct_matrix_sp[[var]])) < 2) next 
+  
+  adj_pvals_table <- data.frame(Species = character(), Kw_p_val = numeric(), stringsAsFactors = FALSE) 
+  for (species_name in taxa_greater_1_names_sp) { 
+    formula_kw <- as.formula(paste(paste0("`", species_name, "`"), "~", var)) 
+    kw_test    <- kruskal.test(formula_kw, data = taxa_1pct_matrix_sp) 
+    adj_pvals_table <- rbind(adj_pvals_table, data.frame(Species = species_name, Kw_p_val = kw_test$p.value)) 
+  } 
+  
+  adj_pvals_table$Kw_p_adj <- p.adjust(adj_pvals_table$Kw_p_val, method = "BH") 
+  kw_df <- adj_pvals_table %>% arrange(Kw_p_adj) %>% mutate(Variable = var) %>% select(Variable, everything())
+  kw_combined_sp <- bind_rows(kw_combined_sp, kw_df)
+  
+  significant_species <- adj_pvals_table$Species[adj_pvals_table$Kw_p_adj < 0.05] 
+  if (length(significant_species) > 0) { 
+    for (species_name in significant_species) { 
+      pw_test <- pairwise.wilcox.test(taxa_1pct_matrix_sp[[species_name]], taxa_1pct_matrix_sp[[var]], p.adjust.method = "BH", exact = FALSE) 
+      p_mat   <- pw_test$p.value 
+      
+      if (!is.null(p_mat)) { 
+        p_vals_melt <- na.omit(reshape2::melt(p_mat)) 
+        if (nrow(p_vals_melt) > 0) { 
+          p_vec <- p_vals_melt$value 
+          names(p_vec) <- paste0(p_vals_melt$Var1, "-", p_vals_melt$Var2) 
+          
+          cld_letters <- NULL 
+          tryCatch({ cld_letters <- multcompView::multcompLetters(p_vec)$Letters }, error = function(e) {}) 
+          
+          for (k in 1:nrow(p_vals_melt)) { 
+            g1 <- as.character(p_vals_melt$Var1[k]) 
+            g2 <- as.character(p_vals_melt$Var2[k]) 
+            padj_val  <- p_vals_melt$value[k] 
+            letter_g1 <- if (!is.null(cld_letters) && g1 %in% names(cld_letters)) cld_letters[g1] else "" 
+            letter_g2 <- if (!is.null(cld_letters) && g2 %in% names(cld_letters)) cld_letters[g2] else "" 
+            cld_format <- if (letter_g1 != "" && letter_g2 != "") paste0(letter_g1, " / ", letter_g2) else "-" 
+            
+            post_hoc_table_sp <- bind_rows(post_hoc_table_sp, data.frame( 
+              Taxonomic_Level     = "Species", 
+              Taxon               = species_name, 
+              Evaluation_Variable = var, 
+              Group_Comparison    = paste0(g1, " vs ", g2), 
+              P_adjusted_FDR      = padj_val, 
+              CLD                 = cld_format, 
+              stringsAsFactors    = FALSE 
+            )) 
+          } 
+        } 
+      } 
+    } 
+  } 
+} 
+
+write.csv(kw_combined_sp, paste0(dir_multi_sp, "/Table_Article_Species1Pct_KruskalWallis_Wilcoxon_Combined.csv"), row.names = FALSE)
+write.csv(post_hoc_table_sp, paste0(dir_multi_sp, "/Post_hoc_pairwise_Species.csv"), row.names = FALSE) 
+sink() 
+```
+
+### Assembly of Supplementary Figure S3 (Alpha Diversity - Species) and Figure S4 (PCoA - Species)
+
+```{r figure-s3-and-s4-assembly, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/DIVERSIDAD_ESPECIE_WILCOXON/results_Alpha2")
+
+img_S3A_raw <- readTIFF("Figure_AlphaDiv_Observed_State_Species.tiff")
+img_S3B_raw <- readTIFF("Figure_AlphaDiv_Observed_Water_body_type_Species.tiff")
+img_S3C_raw <- readTIFF("Figure_AlphaDiv_Shannon_State_Species.tiff")
+img_S3D_raw <- readTIFF("Figure_AlphaDiv_Shannon_Water_body_type_Species.tiff")
+
+grob_S3A <- rasterGrob(img_S3A_raw, interpolate = TRUE)
+grob_S3B <- rasterGrob(img_S3B_raw, interpolate = TRUE)
+grob_S3C <- rasterGrob(img_S3C_raw, interpolate = TRUE)
+grob_S3D <- rasterGrob(img_S3D_raw, interpolate = TRUE)
+
+pS3A <- ggplot() + annotation_custom(grob_S3A, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "A") + tema_alpha_pub
+pS3B <- ggplot() + annotation_custom(grob_S3B, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "B") + tema_alpha_pub
+pS3C <- ggplot() + annotation_custom(grob_S3C, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "C") + tema_alpha_pub
+pS3D <- ggplot() + annotation_custom(grob_S3D, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "D") + tema_alpha_pub
+
+for (lbl in c("A", "B", "C", "D")) {
+  plt <- get(paste0("pS3", lbl))
+  ggsave(paste0("Figure_S3", lbl, ".tiff"), plot = plt, width = 11, height = 10, dpi = 500, compression = "lzw")
+  ggsave(paste0("Figure_S3", lbl, ".pdf"),  plot = plt, width = 11, height = 10, device = "pdf")
+}
+
+setwd("/Scratch/nemerita/proyectos/projectswaters/taxonomy_matrix/DIVERSIDAD_ESPECIE_WILCOXON/results_Beta2")
+
+img_S4A_raw <- readTIFF("Figure_PCoA_BrayCurtis_State_Species.tiff")
+img_S4B_raw <- readTIFF("Figure_PCoA_BrayCurtis_Water_body_type_Species.tiff")
+
+grob_S4A <- rasterGrob(img_S4A_raw, interpolate = TRUE)
+grob_S4B <- rasterGrob(img_S4B_raw, interpolate = TRUE)
+
+pS4A <- ggplot() + annotation_custom(grob_S4A, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "A") + tema_pcoa_pub
+pS4B <- ggplot() + annotation_custom(grob_S4B, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) + theme_void() + labs(tag = "B") + tema_pcoa_pub
+
+ggsave("Figure_S4A.tiff", plot = pS4A, width = 11, height = 8.8, dpi = 500, compression = "lzw")
+ggsave("Figure_S4A.pdf",  plot = pS4A, width = 11, height = 8.8, device = "pdf")
+ggsave("Figure_S4B.tiff", plot = pS4B, width = 11, height = 8.8, dpi = 500, compression = "lzw")
+ggsave("Figure_S4B.pdf",  plot = pS4B, width = 11, height = 8.8, device = "pdf")
+```
+
+<hr>
+
+# Resistome Curation, Deduplication, and RPKG Normalization
+
+This section documents the complete bioinformatic curation of antimicrobial resistance genes (ARGs) detected across four reference databases (`CARD`, `ResFinder`, `ARG-ANNOT`, and `MEGARes`), including nomenclature standardization, removal of intrinsic housekeeping genes, coordinate-based deduplication across contigs, RPKG normalization, and hierarchical visualization of the top 50 AMR determinants.
+
+## Multi-Database Integration (ABRicate Raw Outputs)
+
+```{r resistome-step0-merge, eval=FALSE}
+path_base <- "/Scratch/ssprado/MG_aguas_superficiales/"
+path_out  <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/1_Unión_y_unificación_nombres"
+dir.create(path_out, recursive = TRUE, showWarnings = FALSE)
+
+bases_seleccionadas <- "card|resfinder|argannot|megares" 
+patron_busqueda     <- paste0("out\\.(", bases_seleccionadas, ")\\.tab$")
+
+archivos_crudos <- list.files(
+  path       = path_base, 
+  pattern    = patron_busqueda, 
+  recursive  = TRUE, 
+  full.names = TRUE
+)
+
+leer_y_etiquetar <- function(archivo) {
+  df <- read_delim(archivo, delim = "\t", col_types = cols(.default = col_character()), show_col_types = FALSE)
+  nombre_muestra <- basename(dirname(dirname(dirname(archivo))))
+  
+  if (nrow(df) == 0) {
+    df <- tibble(Sample = nombre_muestra, GENE = "NO_DETECTION")
+  } else {
+    df <- df %>% mutate(Sample = nombre_muestra)
+  }
+  
+  df %>% mutate(Database_Source = basename(archivo))
+}
+
+data_maestra <- map_dfr(archivos_crudos, leer_y_etiquetar)
+write_csv(data_maestra, file.path(path_out, "00_Consolidado_Maestro_Filtrado.csv"))
+```
+
+## Nomenclature Standardization and Intrinsic Gene Filtering (Steps 1 & 1.5)
+
+```{r resistome-step1-audit, eval=FALSE}
+path_in    <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/1_Unión_y_unificación_nombres/00_Consolidado_Maestro_Filtrado.csv"
+path_final <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/1_Unión_y_unificación_nombres/01_TABLA_FINAL_Q1_LIMPIA.csv"
+all_raw    <- read_csv(path_in, show_col_types = FALSE) %>% clean_names()
+
+df_auditado <- all_raw %>%
+  mutate(
+    gene_unif = gene %>% 
+      str_to_lower() %>%
+      str_remove_all("^\\((bla|phe|agly|tet|sul|dfr|mdr|quin|gly|mls|ami|ant|trim|fos|oxa|mup|rif|col|pol|cat|aminoglycoside|macrolide|lincosamide|efflux|regul|resist)\\)") %>% 
+      str_remove_all("aro:[0-9]+-|gb\\|.*?\\||ref\\|.*?\\||\\|") %>%
+      str_replace_all("_", "-") %>% 
+      str_remove_all("^[-]+|[-]+$|(?i)(escherichia|coli|lactobacillus|reuteri|campylobacter|ecoli)") %>%
+      str_replace_all("(?i)\\s*d\\s*prime", "dprime") %>% 
+      str_replace_all("(?i)\\s*prime", "prime") %>%
+      str_trim(),
+    
+    gene_unif = case_when(
+      gene_unif == "aadb" ~ "ant(2'')-Ia",
+      gene_unif == "aadd" ~ "ant(4')-Ib",
+      gene_unif == "msrd" ~ "mel",
+      gene_unif == "ble"  ~ "ble",
+      gene_unif == "tetu" ~ "tet(U)",
+      
+      grepl("[0-9]+dprime", gene_unif) ~ paste0("(", str_extract(gene_unif, "[0-9]+"), "'')"),
+      grepl("[0-9]+prime", gene_unif)  ~ paste0("(", str_extract(gene_unif, "[0-9]+"), "')"),
+      
+      grepl("aac-6-ib-cr|aac6'-ib-cr", gene_unif)   ~ "aac(6')-Ib-cr",
+      grepl("aac-6-ib|aac6'-ib", gene_unif)         ~ "aac(6')-Ib",
+      grepl("aph-3''-ib|stra|orfh", gene_unif)      ~ "aph(3'')-Ib",
+      grepl("aph-6-id|strb|orficard", gene_unif)    ~ "aph(6)-Id",
+      grepl("aad-?a1|str-1|^str$|^aad$", gene_unif) ~ "aadA1",
+      
+      grepl("^(bla)?(oxa|ctx|tem|shv|cfx|ges|mox|tla|veb|cpha|act|aer|per|lcr|kpc|fox|imi|john|lhk|nps|ceph|cmy|amps|nmca|i|bro|amph|carb)", gene_unif) ~ {
+        familia <- str_to_upper(str_extract(str_remove(gene_unif, "^bla"), "^[a-z]+"))
+        subtipo <- str_extract(gene_unif, "[0-9]+([-.][0-9a-z]+)?")
+        ifelse(is.na(subtipo), paste0("bla", familia), paste0("bla", familia, "-", subtipo))
+      },
+      
+      grepl("^tet-?([a-z0-9]+)", gene_unif) ~ {
+        letra <- str_extract(gene_unif, "(?<=tet-?)[a-z0-9]+") %>% str_to_upper()
+        paste0("tet(", letra, ")")
+      },
+      TRUE ~ str_to_upper(gene_unif)
+    )
+  ) %>%
+  filter(!grepl("(?i)(gyra|gyrb|parc|pare|pmra|pmrb|pmrc|mura|murb|murc|murd|mure|murf|murg|ftsi|pbp|blaec|yoji|yogi|cbla|fosa|mdf|h-ns|hns|gad|emr|acr|mdt|tolc|mar|sox|msba|ugd|pmrf|epta|catp|baer|baes|aci|rob|cpx|evg|kdpe|crp|asma|bcr|baca|qcg|sat|myra|ampc|lptd|folp|rpo|glp|gln|dapa|bac|soxs|marr|gadx|gadw|pur|met|pyr|ilv|leu|arg|rpsl|uhpt|pita|glps|dapf|cys|his|fab|trx|atp|lys|thr|pro|gua|tyr|phe|ade|deo|rse|uvr|mut|dna|top|lig|rec|xer|ung|ccp|omp|etk|cps|rcs|arc|opp|pot|pst|liv|pro|mal|lam|btu|fec|fhu|ton|cir|fep|fiu|exb|exd|tol|pal|min|fts|env|lpp|msb|lpt|mrc|pon|dac|rlp|bold|slp|nlp|waac|ompf|ompt|rosa|rosb|blt|kdpe|nfsa|nfsb|fabg|fabi|kdea|estd|spc|phor)", gene_unif)) %>%
+  mutate(class = case_when(
+    grepl("^bla", gene_unif)                     ~ "Beta-lactams (Acquired)",
+    grepl("^aph|^aac|^aad|^str|^ant", gene_unif) ~ "Aminoglycosides",
+    grepl("^tet", gene_unif)                     ~ "Tetracyclines",
+    grepl("^erm|^mph|^ere|^lnu|^mef", gene_unif) ~ "MLS/Oxazolidinones",
+    grepl("^cat|^flo", gene_unif)                ~ "Phenicols",
+    TRUE                                         ~ "Other Mobile"
+  ))
+
+write_csv(df_auditado, path_final)
+
+path_in_15    <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/tablas_control/01_TABLA_FINAL_Q1_LIMPIA.csv"
+path_final_15 <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/tablas_control/01.5_TABLA_AUDITADA_NOMENCLATURA.csv"
+
+df_15 <- read_csv(path_in_15, show_col_types = FALSE) %>%
+  mutate(
+    gene_audit = gene_unif %>%
+      str_remove_all("^\\(.*?\\)\\s*") %>%
+      str_remove_all("(?i)(klebsiella|pneumoniae|escherichia|coli|campylobacter|lactobacillus|reuteri|uncultured|bacterium)-?") %>%
+      str_replace_all("(?i)sul-?i+", "sul1") %>%
+      str_replace_all("(?i)sul-?ii", "sul2") %>%
+      str_replace_all("(?i)sul-?iii", "sul3") %>%
+      str_to_upper() %>%
+      str_trim()
+  ) %>%
+  mutate(
+    gene_audit = case_when(
+      grepl("^BLA", gene_audit) ~ {
+        resto <- str_remove(gene_audit, "^BLA") %>% str_remove_all("^[-_]+")
+        familia_var <- str_to_upper(resto)
+        if_else(grepl("-", familia_var), 
+                paste0("bla-", familia_var), 
+                paste0("bla-", str_extract(familia_var, "^[A-Z]+"), "-", str_remove(familia_var, "^[A-Z]+")))
+      },
+      grepl("APH-3''-IB|STRA|ORFH", gene_audit)  ~ "aph(3'')-Ib",
+      grepl("APH-6-ID|STRB|ORFICARD", gene_audit) ~ "aph(6)-Id",
+      TRUE ~ gene_audit
+    )
+  ) %>%
+  filter(!grepl("(?i)(gyra|parc|mura|ftsi|pbp|blaec|yoji|yogi|mdt|acr|tolc|gad|mar|sox|uhpt|pita|glps|rpsl|folp|rpo|met|his|arg|lys|thr|pro|gua|tyr|phe|ade|deo|rse|uvr|mut|dna|top|lig|rec|xer|ung|ccp|omp|etk|cps|rcs|arc|opp|pot|pst|liv|pro|mal|lam|btu|fec|fhu|ton|cir|fep|fiu|exb|exd|tol|pal|min|fts|env|lpp|msb|lpt|mrc|pon|dac|rlp|bold|slp|nlp|waac|ompf|ompt|rosa|rosb|blt|nfsa|nfsb|fabg|fabi|kdea|estd|spc|phor|fab)", gene_audit)) %>%
+  group_by(gene_audit, class) %>%
+  summarise(across(where(is.numeric), sum), .groups = "drop")
+
+write_csv(df_15, path_final_15)
+```
+
+## CARD ARO Selective Mapping and Final Standardization (Steps 1.6, 1.7 & 1.8)
+
+```{r resistome-step16-17, eval=FALSE}
+path_in_16  <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/tablas_control/01.5_TABLA_AUDITADA_NOMENCLATURA.csv"
+path_card   <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/tablas_control/aro_index.tsv"
+path_out_16 <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/tablas_control/01.6_MATRIZ_FINAL_ARO_AMINO.csv"
+
+diccionario_amino <- read_tsv(path_card, show_col_types = FALSE) %>%
+  select(ARO_Accession = `ARO Accession`, ARO_Name = `ARO Name`, Drug_Class = `Drug Class`) %>%
+  filter(grepl("aminoglycoside", Drug_Class, ignore.case = TRUE)) %>%
+  mutate(gene_norm_card = str_remove_all(str_to_lower(ARO_Name), "[^a-z0-9]")) %>%
+  distinct(gene_norm_card, .keep_all = TRUE)
+
+df_16 <- read_csv(path_in_16, show_col_types = FALSE) %>%
+  mutate(llave = str_remove_all(str_to_lower(gene_audit), "[^a-z0-9]")) %>%
+  left_join(diccionario_amino, by = c("llave" = "gene_norm_card")) %>%
+  select(ARO_Accession, ARO_Name, gene_audit, class, everything(), -llave)
+
+write_csv(df_16, path_out_16)
+
+path_final_17 <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/tablas_control/01.7_TABLA_FINAL_ESTANDARIZADA.csv"
+
+df_17 <- df_16 %>%
+  mutate(
+    gene_final = str_remove_all(gene_audit, "^-+"),
+    gene_final = str_remove_all(gene_final, "-FROM---K-12"),
+    gene_final = str_replace_all(gene_final, "(?i)(aac|ant|aph)([0-9]+)\\s*d\\s*prime", "\\1(\\2'')"),
+    gene_final = str_replace_all(gene_final, "(?i)(aac|ant|aph)([0-9]+)\\s*prime", "\\1(\\2')")
+  ) %>%
+  rowwise() %>%
+  mutate(
+    gene_final = {
+      if (str_detect(gene_final, "aac|ant|aph")) {
+        str_replace_all(gene_final, "-([a-z]+)", function(m) {
+          parte <- str_remove(m, "-")
+          parte_clean <- str_replace_all(parte, "(?i)i", "I") %>%
+            str_replace_all("(?i)v", "V") %>%
+            str_replace_all("[aeou]", str_to_lower)
+          paste0("-", parte_clean)
+        })
+      } else {
+        gene_final
+      }
+    }
+  ) %>%
+  ungroup() %>%
+  mutate(
+    gene_final = case_when(
+      grepl("(?i)^bla", gene_final) ~ {
+        nombre <- str_remove_all(gene_final, "-") %>% str_remove("(?i)bla") %>% str_to_upper()
+        paste0("bla", nombre)
+      },
+      grepl("(?i)^tet", gene_final) ~ {
+        resto <- str_remove(gene_final, "(?i)tet") %>% str_to_upper()
+        paste0("tet", resto)
+      },
+      TRUE ~ gene_final
+    )
+  ) %>%
+  group_by(gene_final, class) %>%
+  summarise(across(where(is.numeric), \(x) sum(x, na.rm = TRUE)), .groups = "drop")
+
+write_csv(df_17, path_final_17)
+```
+
+```{python resistome-step18-manual-curation, eval=FALSE}
+import pandas as pd
+
+df_manual = pd.read_csv('01.7_TABLA_FINAL_ESTANDARIZADA_MANUAL.csv')
+df_main   = pd.read_csv('01_TABLA_FINAL_Q1_LIMPIA.csv')
+
+mapping = dict(zip(df_manual['gene_final'], df_manual['gene_final_manual_edition']))
+
+df_main['gene_unif_updated'] = df_main['gene_unif'].map(mapping).fillna(df_main['gene_unif'])
+df_main.to_csv('01.8_TABLA_FINAL_CORREGIDA.csv', index=False)
+```
+
+## Coordinate-Based Contig Deduplication (> 50% Overlap Clustering)
+
+```{python resistome-step2-deduplication, eval=FALSE}
+import pandas as pd
+import numpy as np
+
+df_original = pd.read_csv('01.8_TABLA1_+_TABLA1.7.1_+_EDICION_MANUAL_+.csv')
+df_clean    = df_original.dropna(subset=['sequence', 'start', 'end']).copy()
+df_clean.sort_values(['sample', 'sequence', 'start'], inplace=True)
+
+def is_overlapping(s1, e1, s2, e2):
+    overlap_start = max(s1, s2)
+    overlap_end   = min(e1, e2)
+    overlap_len   = max(0, overlap_end - overlap_start)
+    len1 = e1 - s1
+    len2 = e2 - s2
+    if len1 == 0 or len2 == 0:
+        return False
+    return (overlap_len / len1 > 0.5) or (overlap_len / len2 > 0.5)
+
+clusters   = []
+cluster_id = 0
+
+for (samp, seq), group in df_clean.groupby(['sample', 'sequence']):
+    group = group.sort_values('start').reset_index(drop=False)
+    current_clusters = []
+    
+    for _, row in group.iterrows():
+        idx  = row['index']
+        s, e = row['start'], row['end']
+        placed = False
+        for c in current_clusters:
+            if any(is_overlapping(s, e, group.loc[group['index'] == c_idx, 'start'].values[0],
+                                        group.loc[group['index'] == c_idx, 'end'].values[0]) for c_idx in c):
+                c.append(idx)
+                placed = True
+                break
+        if not placed:
+            current_clusters.append([idx])
+            
+    for c in current_clusters:
+        for idx in c:
+            clusters.append({'index': idx, 'cluster_id': cluster_id})
+        cluster_id += 1
+
+cluster_df = pd.DataFrame(clusters)
+df_clean   = df_clean.merge(cluster_df, left_index=True, right_on='index')
+df_clean['copies_in_sample'] = df_clean.groupby(['sample', 'database_source', 'gene_unif_updated_+_manual'])['index'].transform('count')
+
+def select_best_annotation(group):
+    if len(group) == 1:
+        return group.iloc[0]
+    return group.sort_values(
+        by=['copies_in_sample', 'percent_identity', 'percent_coverage'],
+        ascending=[False, False, False]
+    ).iloc[0]
+
+df_filtered = df_clean.groupby('cluster_id').apply(select_best_annotation).reset_index(drop=True)
+df_filtered.drop(columns=['index', 'cluster_id', 'copies_in_sample'], inplace=True, errors='ignore')
+
+missing  = df_original[df_original[['sequence', 'start', 'end']].isnull().any(axis=1)].copy()
+df_final = pd.concat([df_filtered, missing], ignore_index=True)
+df_final.to_csv('02_FILTRADO_GENES_COPIAS_FINAL.csv', index=False)
+```
+
+## RPKG Normalization and Antimicrobial Class Refinement
+
+$$\text{RPKG} = \frac{\text{Contig Coverage} \times 1000}{\text{Average Read Length (bp)} \times \text{Total Sequenced Gigabases (Gb)}}$$
+
+```{r resistome-step3-rpkg, eval=FALSE}
+dir_genes <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/2_Deduplicación/"
+dir_stats <- "/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/3_RPKG/RPKG_datos_BOWTIE2/"
+
+df_genes <- read_csv(paste0(dir_genes, "02_FILTRADO_GENES_COPIAS_FINAL.csv"), show_col_types = FALSE)
+df_stats <- read_tsv(paste0(dir_stats, "tabla_basic_stats_MoG.txt"), show_col_types = FALSE) %>%
+  select(Sample, Total_bases, Long_promedio)
+
+stats_processed <- df_stats %>%
+  mutate(sample_base = str_remove(Sample, "_R[12]\\.fastq$")) %>%
+  group_by(sample_base) %>%
+  summarise(
+    total_bases_sample = sum(Total_bases),
+    avg_read_length    = mean(Long_promedio),
+    .groups            = "drop"
+  ) %>%
+  mutate(total_gb = total_bases_sample / 1e9)
+
+df_clean <- df_genes %>%
+  filter(!is.na(sequence) & sequence != "NO_DETECTION") %>%
+  mutate(contig_coverage = as.numeric(str_extract(sequence, "(?<=cov_)[0-9.]+"))) %>%
+  replace_na(list(contig_coverage = 0))
+
+df_final <- df_clean %>%
+  left_join(stats_processed, by = c("sample" = "sample_base")) %>%
+  mutate(RPKG = (contig_coverage * 1000) / (avg_read_length * total_gb))
+
+write_csv(df_final, paste0(dir_stats, "RPKG_Abundance_Detailed.csv"))
+
+abundance_by_class <- df_final %>%
+  group_by(sample, class) %>%
+  summarise(total_RPKG = sum(RPKG, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = class, values_from = total_RPKG, values_fill = 0)
+write_csv(abundance_by_class, paste0(dir_stats, "RPKG_Abundance_by_Class.csv"))
+
+abundance_by_gene <- df_final %>%
+  group_by(sample, `gene_unif_updated_+_manual`) %>%
+  summarise(total_RPKG = sum(RPKG, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = `gene_unif_updated_+_manual`, values_from = total_RPKG, values_fill = 0)
+write_csv(abundance_by_gene, paste0(dir_stats, "RPKG_Abundance_by_Gene.csv"))
+
+setwd(dir_stats)
+df_completo <- df_final %>%
+  mutate(
+    gene_temp  = `gene_unif_updated_+_manual`,
+    gene_lower = tolower(gene_temp), 
+    prod_lower = tolower(product),
+    refined_class = case_when(
+      grepl("bla|meca|cph", gene_lower) | grepl("betalactam|beta-lactamase|carbapenem|mbl", prod_lower) ~ "Beta-lactamase",
+      grepl("efflux|pump|acr|mex|mac|qac|mext|mtra|oqx|rama", prod_lower) | grepl("qac|mext|mtra|mex|oqx|rama", gene_lower) ~ "Efflux Pump / Biocide Resistance",
+      grepl("tet", gene_lower) | grepl("tetracycline", prod_lower) ~ "Tetracycline Resistance",
+      grepl("dfr", gene_lower) | grepl("tmt|trimethoprim|dihydrofolate", prod_lower) ~ "Trimethoprim Resistance",
+      grepl("sul", gene_lower) | grepl("sulfonamide", prod_lower) ~ "Sulfonamide Resistance",
+      grepl("qnr", gene_lower) | grepl("flq|quinolone|fluoroquinolone", prod_lower) ~ "Fluoroquinolone Resistance",
+      grepl("mls|macrolide|lincosamide|streptogramin", prod_lower) | grepl("lnu|erm|mph|mef|msr|lsa|ere", gene_lower) ~ "Macrolide/Lincosamide/Streptogramin Resistance",
+      grepl("agly|aminoglycoside", prod_lower) | grepl("^aad|^aph|^ant|str[ab]|rmt", gene_lower) ~ "Aminoglycoside Resistance",
+      grepl("phe|phenicol", prod_lower) | grepl("flo|cmx|fexa|cat|cml", gene_lower) ~ "Phenicol Resistance",
+      grepl("rif|rifampin|rifamycin", prod_lower) | grepl("arr|rbp", gene_lower) ~ "Rifamycin Resistance",
+      grepl("mcr", gene_lower) | grepl("colistin|polymyxin", prod_lower) ~ "Polymyxin Resistance",
+      grepl("van|ble", gene_lower) | grepl("glycopeptide", prod_lower) ~ "Glycopeptide Resistance",
+      grepl("fos", gene_lower) | grepl("fosfomycin", prod_lower) ~ "Fosfomycin Resistance",
+      grepl("iles", gene_lower) | grepl("mupirocin", prod_lower) ~ "Mupirocin Resistance",
+      grepl("optra", gene_lower) | grepl("oxazolidinone|oxzln", prod_lower) ~ "Oxazolidinone Resistance",
+      TRUE ~ "Other/General Resistance"
+    )
+  ) %>%
+  select(-gene_temp, -gene_lower, -prod_lower)
+
+write.csv(df_completo, "RPKG_Abundance_Corrected_Total.csv", row.names = FALSE, quote = FALSE)
+```
+
+## Top 50 AMR Determinants: Statistical Summary and Hierarchical Heatmap
+
+```{r resistome-top50-heatmap, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/ABRICATE/depuracion_ram_final/3_RPKG/RPKG_datos_BOWTIE2/RESISTOMA_31")
+
+df_wide     <- read.csv("RPKG_Abundance_Estricto.csv", check.names = FALSE)
+col_muestra <- colnames(df_wide)[1]
+df_wide[[col_muestra]] <- gsub("^([A-Z]+)_0?(\\d+)_.*", "\\1\\2", df_wide[[col_muestra]])
+
+mat_gene_raw <- df_wide %>% column_to_rownames(var = col_muestra) %>% as.matrix()
+
+top_50_completa <- df_wide %>%
+  pivot_longer(cols = -all_of(col_muestra), names_to = "gene", values_to = "RPKG") %>%
+  rename(sample = all_of(col_muestra)) %>%
+  group_by(gene) %>%
+  summarise(
+    Total_RPKG                     = sum(RPKG, na.rm = TRUE),
+    Abundancia_Relativa_Porcentaje = (sum(RPKG, na.rm = TRUE) / sum(df_wide[, -1], na.rm = TRUE)) * 100,
+    Muestras_Positivas             = n_distinct(sample[RPKG > 0]),
+    Prevalencia_Porcentaje         = (n_distinct(sample[RPKG > 0]) / nrow(df_wide)) * 100,
+    .groups                        = "drop"
+  ) %>%
+  arrange(desc(Total_RPKG)) %>%
+  slice_head(n = 50) %>%
+  mutate(across(where(is.numeric), ~round(., 3)))
+
+write.csv(top_50_completa, "Supplementary_Table_Top_50_Genes_Q12.csv", row.names = FALSE)
+
+top_50_nombres <- top_50_completa$gene
+mat_final      <- t(mat_gene_raw[, top_50_nombres])
+
+df_clases <- data.frame(gene = rownames(mat_final)) %>%
+  mutate(
+    gene_lower = tolower(gene),
+    refined_class = case_when(
+      grepl("bla|meca|cph", gene_lower)                ~ "Beta-lactamase",
+      grepl("qac|mext|mtra|mex|oqx|rama", gene_lower)  ~ "Efflux Pump / Biocide Resistance",
+      grepl("tet", gene_lower)                         ~ "Tetracycline Resistance",
+      grepl("aph|aac|ant|aad", gene_lower)             ~ "Aminoglycoside Resistance",
+      grepl("qnr|gyr|par", gene_lower)                 ~ "Fluoroquinolone Resistance",
+      grepl("erm|mef|mph|msr|lnu|vga|ere", gene_lower) ~ "Macrolide/Lincosamide",
+      grepl("sul|dfr", gene_lower)                     ~ "Folate Pathway Antagonist",
+      grepl("cat|flo|cml", gene_lower)                 ~ "Phenicol Resistance",
+      TRUE                                             ~ "Other AMR Categories"
+    )
+  )
+
+orden_clases <- data.frame(gene = rownames(mat_final), abundancia = rowSums(mat_final)) %>%
+  left_join(df_clases, by = "gene") %>%
+  group_by(refined_class) %>%
+  summarise(total_class = sum(abundancia)) %>%
+  arrange(desc(total_class)) %>%
+  pull(refined_class)
+
+df_clases$refined_class <- factor(df_clases$refined_class, levels = orden_clases)
+
+colores_nueva_paleta <- c("#E6194B", "#3CB44B", "#4363D8", "#911EB4", "#46F0F0", 
+                          "#F032E6", "#008080", "#B6E861", "#000080", "#8B008B", 
+                          "#800000", "#AAFFC3", "#808000", "#000075", "#808080", "#FF0000")
+
+colores_clases <- setNames(colores_nueva_paleta[1:length(orden_clases)], orden_clases)
+col_rpkg       <- colorRamp2(c(0, 10, 100), c("white", "gold", "firebrick"))
+
+ha_right <- rowAnnotation(
+  Class = df_clases$refined_class, 
+  col   = list(Class = colores_clases),
+  annotation_legend_param = list(Class = list(title = "Gene Class", title_gp = gpar(fontface = "bold")))
+)
+
+p_gene <- Heatmap(
+  mat_final, 
+  name               = "RPKG", 
+  column_title       = "Top 50 AMR Determinants (Abundance Profile)",
+  column_title_gp    = gpar(fontsize = 16, fontface = "bold", fontfamily = "sans"),
+  border             = TRUE, 
+  rect_gp            = gpar(col = "gray90", lwd = 0.5),
+  show_row_dend      = TRUE, 
+  row_dend_gp        = gpar(lty = 1, col = "black", lwd = 1), 
+  row_split          = df_clases$refined_class,
+  row_title_rot      = 0,
+  row_title_gp       = gpar(fontsize = 10, fontface = "bold", fontfamily = "sans"),
+  right_annotation   = ha_right,
+  row_names_gp       = gpar(fontface = "italic", fontfamily = "sans", fontsize = 10),
+  column_names_gp    = gpar(fontsize = 9, fontfamily = "sans"),
+  col                = col_rpkg,
+  cluster_rows       = TRUE, 
+  cluster_columns    = TRUE,
+  cluster_row_slices = FALSE 
+)
+
+ancho <- 16; alto <- 12
+
+pdf("Heatmap_Genes_Final_Q12.pdf", width = ancho, height = alto)
+draw(p_gene); invisible(dev.off())
+
+png("Heatmap_Genes_Final_Q12.png", width = ancho, height = alto, units = "in", res = 600)
+draw(p_gene); invisible(dev.off())
+
+tiff("Heatmap_Genes_Final_Q12.tiff", width = ancho, height = alto, units = "in", res = 500, compression = "lzw")
+draw(p_gene); invisible(dev.off())
+```
+
+<hr>
+
+# Resistome Multivariate Structure
+
+This section evaluates the multivariate composition and structural variance of the resistome across aquatic environments using Bray-Curtis distances, PCoA ordinations, PERMANOVA, and homogeneity of multivariate dispersions (PERMDISP).
+
+## Multivariate Analysis of Resistome Composition
+
+```{r resistome-multivariate, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/multivariado resistoma_source_wbt")
+dir_out <- "results_Resistome_Multivariate"
+if (!dir.exists(dir_out)) dir.create(dir_out)
+
+wbt_colors <- c("Lentic" = "#E8685D", "Lotic" = "#86C186")
+state_colors <- c("Mexico City" = "#8BCEBA", "Morelos" = "#A5B6D9", "State of Mexico" = "#EFC24A", "Tlaxcala" = "#9D559E")
+source_colors <- c("Canal" = "#4575B4", "River" = "#FDAE61", "Pond" = "#91CF60", "Dam" = "#762A83")
+
+res_table <- read.csv("RPKG_Abundance_Estricto.csv", row.names = 1, check.names = FALSE)
+metadata  <- read_tsv("metadatos_saida_ultimos.txt", show_col_types = FALSE) %>% as.data.frame()
+
+if ("Sample" %in% colnames(metadata)) {
+  metadata <- metadata %>% rename(`Sample name` = Sample)
+} else if (!"Sample name" %in% colnames(metadata)) {
+  colnames(metadata)[1] <- "Sample name"
+}
+
+common_samples <- intersect(rownames(res_table), metadata$`Sample name`)
+res_matrix <- as.matrix(res_table[common_samples, ])
+clean_meta <- metadata %>% filter(`Sample name` %in% common_samples) %>% arrange(`Sample name`)
+
+clean_meta$`Water body type` <- factor(clean_meta$`Water body type`, levels = c("Lentic", "Lotic"))
+clean_meta$State <- factor(clean_meta$State, levels = c("Mexico City", "Morelos", "State of Mexico", "Tlaxcala"))
+if ("Source" %in% colnames(clean_meta)) {
+  clean_meta$Source <- factor(clean_meta$Source, levels = c("Canal", "River", "Pond", "Dam"))
+}
+
+dist_res <- vegdist(res_matrix, method = "bray")
+
+set.seed(123)
+perm_wbt   <- adonis2(dist_res ~ `Water body type`, data = clean_meta, permutations = 999)
+disp_wbt   <- permutest(betadisper(dist_res, clean_meta$`Water body type`), permutations = 999)
+
+set.seed(123)
+perm_state <- adonis2(dist_res ~ State, data = clean_meta, permutations = 999)
+disp_state <- permutest(betadisper(dist_res, clean_meta$State), permutations = 999)
+
+if ("Source" %in% colnames(clean_meta)) {
+  set.seed(123)
+  perm_source <- adonis2(dist_res ~ Source, data = clean_meta, permutations = 999)
+  disp_source <- permutest(betadisper(dist_res, clean_meta$Source), permutations = 999)
+}
+
+pcoa_res <- cmdscale(dist_res, k = 2, eig = TRUE)
+var_exp  <- round(pcoa_res$eig / sum(pcoa_res$eig) * 100, 1)
+
+df_pcoa <- data.frame(
+  `Sample name` = rownames(res_matrix),
+  PCoA1 = pcoa_res$points[, 1],
+  PCoA2 = pcoa_res$points[, 2],
+  check.names = FALSE
+) %>% left_join(clean_meta, by = "Sample name")
+
+theme_q1 <- theme_classic(base_size = 13) +
+  theme(
+    axis.text = element_text(color = "black", size = 11),
+    axis.title = element_text(face = "bold"),
+    axis.line = element_line(linewidth = 0.8, color = "black"),
+    axis.ticks = element_line(linewidth = 0.8, color = "black"),
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, color = "gray30"),
+    legend.position = "right"
+  )
+
+plot_wbt <- ggplot(df_pcoa, aes(x = PCoA1, y = PCoA2)) +
+  stat_ellipse(aes(color = `Water body type`, fill = `Water body type`), type = "norm", geom = "polygon", alpha = 0.15, linetype = "dashed", linewidth = 0.8) +
+  geom_point(aes(fill = `Water body type`), shape = 21, size = 3.5, color = "black", stroke = 0.8) +
+  scale_fill_manual(values = wbt_colors) +
+  scale_color_manual(values = wbt_colors) +
+  theme_q1 +
+  labs(
+    title = "Resistome Composition by Water Body Type",
+    subtitle = sprintf("PERMANOVA: R² = %.3f (p = %.3f) | PERMDISP: p = %.3f", perm_wbt$R2[1], perm_wbt$`Pr(>F)`[1], disp_wbt$tab$`Pr(>F)`[1]),
+    x = sprintf("PCoA1 (%.1f%%)", var_exp[1]),
+    y = sprintf("PCoA2 (%.1f%%)", var_exp[2])
+  )
+ggsave(paste0(dir_out, "/Figure_Composition_PCoA_WaterBody.tiff"), plot = plot_wbt, width = 8, height = 6, dpi = 500, compression = "lzw")
+
+plot_state <- ggplot(df_pcoa, aes(x = PCoA1, y = PCoA2)) +
+  stat_ellipse(aes(color = State, fill = State), type = "norm", geom = "polygon", alpha = 0.15, linetype = "dashed", linewidth = 0.8) +
+  geom_point(aes(fill = State), shape = 21, size = 3.5, color = "black", stroke = 0.8) +
+  scale_fill_manual(values = state_colors) +
+  scale_color_manual(values = state_colors) +
+  theme_q1 +
+  labs(
+    title = "Resistome Composition by State",
+    subtitle = sprintf("PERMANOVA: R² = %.3f (p = %.3f) | PERMDISP: p = %.3f", perm_state$R2[1], perm_state$`Pr(>F)`[1], disp_state$tab$`Pr(>F)`[1]),
+    x = sprintf("PCoA1 (%.1f%%)", var_exp[1]),
+    y = sprintf("PCoA2 (%.1f%%)", var_exp[2])
+  )
+ggsave(paste0(dir_out, "/Figure_Composition_PCoA_State.tiff"), plot = plot_state, width = 8.5, height = 6, dpi = 500, compression = "lzw")
+
+if ("Source" %in% colnames(clean_meta)) {
+  plot_source <- ggplot(df_pcoa, aes(x = PCoA1, y = PCoA2)) +
+    stat_ellipse(aes(color = Source, fill = Source), type = "norm", geom = "polygon", alpha = 0.15, linetype = "dashed", linewidth = 0.8) +
+    geom_point(aes(fill = Source), shape = 21, size = 3.5, color = "black", stroke = 0.8) +
+    scale_fill_manual(values = source_colors) +
+    scale_color_manual(values = source_colors) +
+    theme_q1 +
+    labs(
+      title = "Resistome Composition by Source",
+      subtitle = sprintf("PERMANOVA: R² = %.3f (p = %.3f) | PERMDISP: p = %.3f", perm_source$R2[1], perm_source$`Pr(>F)`[1], disp_source$tab$`Pr(>F)`[1]),
+      x = sprintf("PCoA1 (%.1f%%)", var_exp[1]),
+      y = sprintf("PCoA2 (%.1f%%)", var_exp[2])
+    )
+  ggsave(paste0(dir_out, "/Figure_Composition_PCoA_Source.tiff"), plot = plot_source, width = 8.5, height = 6, dpi = 500, compression = "lzw")
+}
+```
+
+<hr>
+
+# Tripartite Cross-Analysis and Co-occurrence Networks (Genus & Species vs. Resistome vs. Environment)
+
+This section evaluates the coupling between taxonomic composition (Genus and Species levels) and resistome dynamics while controlling for environmental physicochemical parameters ($pH$, temperature, and turbidity) through Partial Mantel tests, tripartite Procrustes analyses with environmental vector fitting (`envfit`), and Spearman co-occurrence heatmaps with FDR correction.
+
+## Genus-Level Cross-Analysis and Co-occurrence Heatmap
+
+```{r genus-cross-analysis, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/RESISTOMAvsABUNDANCIAvsAMBIENTE/GENUS/31_MUESTRAS")
+dir_cross <- "results_CrossAnalysis"
+if (!dir.exists(dir_cross)) dir.create(dir_cross)
+
+metadatos_stats <- read_tsv("metadatos_saida_ultimos.txt", show_col_types = FALSE) %>% as.data.frame()
+if (!"Sample" %in% colnames(metadatos_stats)) colnames(metadatos_stats)[1] <- "Sample"
+variables_continuas <- c("pH", "Temperature", "Turbidity")
+metadatos_stats[variables_continuas] <- lapply(metadatos_stats[variables_continuas], as.numeric)
+
+tabla_genus <- read.csv("Abundancia_Relativa_31_Genus.csv", row.names = 1, check.names = FALSE)
+tabla_res   <- read.csv("RPKG_Abundance_Estricto.csv", row.names = 1, check.names = FALSE)
+
+muestras_genus_res <- intersect(colnames(tabla_genus), rownames(tabla_res))
+muestras_comunes   <- sort(intersect(muestras_genus_res, metadatos_stats$Sample))
+
+matriz_genus <- as.matrix(t(tabla_genus[, muestras_comunes]))
+matriz_res   <- as.matrix(tabla_res[muestras_comunes, ])
+meta_limpio  <- metadatos_stats %>% filter(Sample %in% muestras_comunes) %>% arrange(Sample) %>% rename(`Sample name` = Sample)
+
+dist_genus <- vegdist(matriz_genus, method = "bray")
+dist_res   <- vegdist(matriz_res, method = "bray")
+dist_env   <- vegdist(scale(meta_limpio %>% select(any_of(variables_continuas))), method = "euclidean")
+
+set.seed(123)
+mantel_simple  <- mantel(dist_genus, dist_res, method = "spearman", permutations = 999)
+set.seed(123)
+mantel_parcial <- mantel.partial(dist_genus, dist_res, dist_env, method = "spearman", permutations = 999)
+
+pcoa_genus <- cmdscale(dist_genus, k = 2)
+pcoa_res   <- cmdscale(dist_res, k = 2)
+
+set.seed(123)
+procrustes_res <- protest(X = pcoa_genus, Y = pcoa_res, permutations = 999)
+
+set.seed(123)
+envfit_cross <- envfit(pcoa_genus, meta_limpio %>% select(any_of(variables_continuas)), permutations = 999, na.rm = TRUE)
+df_vectores  <- as.data.frame(envfit_cross$vectors$arrows) %>% cbind(p_val = envfit_cross$vectors$pvals) %>% rownames_to_column("Variable") %>% filter(p_val < 0.05)
+
+pro_data <- data.frame(
+  `Sample name` = rownames(matriz_genus),
+  Genus_Dim1 = procrustes_res$X[, 1], Genus_Dim2 = procrustes_res$X[, 2],
+  Res_Dim1 = procrustes_res$Yrot[, 1], Res_Dim2 = procrustes_res$Yrot[, 2],
+  check.names = FALSE
+) %>% left_join(meta_limpio, by = "Sample name")
+
+escala <- 0.35 
+plot_procrustes <- ggplot() +
+  geom_segment(data = pro_data, aes(x = Genus_Dim1, y = Genus_Dim2, xend = Res_Dim1, yend = Res_Dim2), color = "gray60", linewidth = 0.5, alpha = 0.6) +
+  geom_point(data = pro_data, aes(x = Genus_Dim1, y = Genus_Dim2, fill = "Genus"), shape = 21, size = 3) +
+  geom_point(data = pro_data, aes(x = Res_Dim1, y = Res_Dim2, fill = "Resistome"), shape = 21, size = 3) +
+  scale_fill_manual(values = c("Genus" = "#2166AC", "Resistome" = "#B2182B"), name = "Matrix") +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "Tripartite Procrustes: Genera, Resistome & Environment",
+    subtitle = sprintf("Procrustes Corr = %.3f | Partial Mantel r = %.3f", procrustes_res$t0, mantel_parcial$statistic),
+    x = "Dimension 1", y = "Dimension 2"
+  )
+
+if (nrow(df_vectores) > 0) {
+  plot_procrustes <- plot_procrustes +
+    geom_segment(data = df_vectores, aes(x = 0, y = 0, xend = Dim1 * escala, yend = Dim2 * escala), arrow = arrow(length = unit(0.2, "cm")), color = "forestgreen", linewidth = 1.2) +
+    geom_text_repel(data = df_vectores, aes(x = Dim1 * escala, y = Dim2 * escala, label = Variable), color = "forestgreen", fontface = "bold", size = 4.5)
+}
+
+ggsave(paste0(dir_cross, "/Figure_Procrustes_Tripartite.png"), plot = plot_procrustes, width = 8, height = 6, dpi = 300)
+ggsave(paste0(dir_cross, "/Figure_Procrustes_Tripartite.tiff"), plot = plot_procrustes, width = 8, height = 6, dpi = 500, compression = "lzw")
+
+UMBRAL_GENUS      <- 1 
+medias_genus      <- colMeans(matriz_genus)
+top_genus_names   <- names(medias_genus[medias_genus > UMBRAL_GENUS])
+TOP_RES           <- 50
+top_res_names     <- names(sort(colMeans(matriz_res), decreasing = TRUE)[1:TOP_RES])
+
+mat_genus_top     <- matriz_genus[, top_genus_names, drop = FALSE]
+mat_res_top       <- matriz_res[, top_res_names, drop = FALSE]
+
+tabla_coocurrencia <- data.frame()
+for (genus in top_genus_names) {
+  for (gen in top_res_names) {
+    if (sd(mat_genus_top[, genus]) > 0 & sd(mat_res_top[, gen]) > 0) {
+      test <- cor.test(mat_genus_top[, genus], mat_res_top[, gen], method = "spearman", exact = FALSE)
+      tabla_coocurrencia <- rbind(tabla_coocurrencia, data.frame(Genus = genus, ARG = gen, rho = test$estimate, p_val = test$p.value))
+    }
+  }
+}
+
+tabla_coocurrencia$p_adj <- p.adjust(tabla_coocurrencia$p_val, method = "BH")
+tabla_significativa <- tabla_coocurrencia %>% 
+  mutate(Significance = case_when(p_adj < 0.001 ~ "***", p_adj < 0.01 ~ "**", p_adj < 0.05 ~ "*", TRUE ~ ""))
+
+write.csv(tabla_significativa %>% arrange(p_adj), paste0(dir_cross, "/Table_Genus_ARG_Correlations.csv"), row.names = FALSE)
+
+args_unicos <- unique(tabla_significativa$ARG)
+labels_x    <- setNames(lapply(args_unicos, function(x) bquote(italic(.(x)))), args_unicos)
+
+genus_unicos <- unique(tabla_significativa$Genus)
+labels_y     <- setNames(lapply(genus_unicos, function(x) {
+  if (grepl("sp\\. NEB 394", x)) {
+    parte_genero <- sub(" sp\\. NEB 394.*", "", x)
+    bquote(italic(.(parte_genero)) ~ "sp. NEB 394")
+  } else {
+    bquote(italic(.(x)))
+  }
+}), genus_unicos)
+
+plot_cross_heatmap <- ggplot(tabla_significativa, aes(x = ARG, y = Genus, fill = rho)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = Significance), color = "black", size = 3, vjust = 0.7) +
+  scale_fill_gradient2(low = "#4575B4", mid = "white", high = "#D73027", midpoint = 0, limits = c(-1, 1), name = "Spearman's \nrho") +
+  scale_x_discrete(labels = labels_x) +
+  scale_y_discrete(labels = labels_y) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size = 8), 
+    axis.text.y = element_text(color = "black", size = 9),                        
+    axis.title = element_blank(), panel.grid = element_blank(), 
+    plot.title = element_text(face = "bold", size = 12)
+  ) +
+  labs(title = "Co-occurrence: Core Genera vs Core Antimicrobial Resistance Genes", subtitle = "* FDR p < 0.05, ** FDR p < 0.01, *** FDR p < 0.001")
+
+ggsave(paste0(dir_cross, "/Figure_Heatmap_Genus_vs_ARG.png"), plot = plot_cross_heatmap, width = 12, height = 7, dpi = 300)
+ggsave(paste0(dir_cross, "/Figure_Heatmap_Genus_vs_ARG.tiff"), plot = plot_cross_heatmap, width = 12, height = 7, dpi = 500, compression = "lzw")
+```
+
+## Species-Level Cross-Analysis and Co-occurrence Heatmap
+
+```{r species-cross-analysis, eval=FALSE}
+setwd("/Scratch/nemerita/proyectos/projectswaters/RESISTOMAvsABUNDANCIAvsAMBIENTE/SPECIES/31_MUESTRAS")
+dir_cross_sp <- "results_CrossAnalysis"
+if (!dir.exists(dir_cross_sp)) dir.create(dir_cross_sp)
+
+tabla_species <- read.csv("Abundancia_Relativa_31_Species.csv", row.names = 1, check.names = FALSE)
+muestras_species_res <- intersect(colnames(tabla_species), rownames(tabla_res))
+muestras_comunes_sp  <- sort(intersect(muestras_species_res, metadatos_stats$Sample))
+
+matriz_species <- as.matrix(t(tabla_species[, muestras_comunes_sp]))
+matriz_res_sp  <- as.matrix(tabla_res[muestras_comunes_sp, ])
+meta_limpio_sp <- metadatos_stats %>% filter(Sample %in% muestras_comunes_sp) %>% arrange(Sample) %>% rename(`Sample name` = Sample)
+
+dist_species <- vegdist(matriz_species, method = "bray")
+dist_res_sp  <- vegdist(matriz_res_sp, method = "bray")
+
+set.seed(123)
+mantel_simple_sp  <- mantel(dist_species, dist_res_sp, method = "spearman", permutations = 999)
+set.seed(123)
+mantel_parcial_sp <- mantel.partial(dist_species, dist_res_sp, dist_env, method = "spearman", permutations = 999)
+
+pcoa_species <- cmdscale(dist_species, k = 2)
+pcoa_res_sp  <- cmdscale(dist_res_sp, k = 2)
+
+set.seed(123)
+procrustes_res_sp <- protest(X = pcoa_species, Y = pcoa_res_sp, permutations = 999)
+
+set.seed(123)
+envfit_cross_sp <- envfit(pcoa_species, meta_limpio_sp %>% select(any_of(variables_continuas)), permutations = 999, na.rm = TRUE)
+df_vectores_sp  <- as.data.frame(envfit_cross_sp$vectors$arrows) %>% cbind(p_val = envfit_cross_sp$vectors$pvals) %>% rownames_to_column("Variable") %>% filter(p_val < 0.05)
+
+pro_data_sp <- data.frame(
+  `Sample name` = rownames(matriz_species),
+  Species_Dim1 = procrustes_res_sp$X[, 1], Species_Dim2 = procrustes_res_sp$X[, 2],
+  Res_Dim1 = procrustes_res_sp$Yrot[, 1], Res_Dim2 = procrustes_res_sp$Yrot[, 2],
+  check.names = FALSE
+) %>% left_join(meta_limpio_sp, by = "Sample name")
+
+plot_procrustes_sp <- ggplot() +
+  geom_segment(data = pro_data_sp, aes(x = Species_Dim1, y = Species_Dim2, xend = Res_Dim1, yend = Res_Dim2), color = "gray60", linewidth = 0.5, alpha = 0.6) +
+  geom_point(data = pro_data_sp, aes(x = Species_Dim1, y = Species_Dim2, fill = "Species"), shape = 21, size = 3) +
+  geom_point(data = pro_data_sp, aes(x = Res_Dim1, y = Res_Dim2, fill = "Resistome"), shape = 21, size = 3) +
+  scale_fill_manual(values = c("Species" = "#2166AC", "Resistome" = "#B2182B"), name = "Matrix") +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "Tripartite Procrustes: Species, Resistome & Environment",
+    subtitle = sprintf("Procrustes Corr = %.3f | Partial Mantel r = %.3f", procrustes_res_sp$t0, mantel_parcial_sp$statistic),
+    x = "Dimension 1", y = "Dimension 2"
+  )
+
+if (nrow(df_vectores_sp) > 0) {
+  plot_procrustes_sp <- plot_procrustes_sp +
+    geom_segment(data = df_vectores_sp, aes(x = 0, y = 0, xend = Dim1 * escala, yend = Dim2 * escala), arrow = arrow(length = unit(0.2, "cm")), color = "forestgreen", linewidth = 1.2) +
+    geom_text_repel(data = df_vectores_sp, aes(x = Dim1 * escala, y = Dim2 * escala, label = Variable), color = "forestgreen", fontface = "bold", size = 4.5)
+}
+
+ggsave(paste0(dir_cross_sp, "/Figure_Procrustes_Tripartite_Species.png"), plot = plot_procrustes_sp, width = 8, height = 6, dpi = 300)
+ggsave(paste0(dir_cross_sp, "/Figure_Procrustes_Tripartite_Species.tiff"), plot = plot_procrustes_sp, width = 8, height = 6, dpi = 500, compression = "lzw")
+
+UMBRAL_SPECIES     <- 1 
+medias_species     <- colMeans(matriz_species)
+top_species_names  <- names(medias_species[medias_species > UMBRAL_SPECIES])
+mat_species_top    <- matriz_species[, top_species_names, drop = FALSE]
+
+tabla_coocurrencia_sp <- data.frame()
+for (species in top_species_names) {
+  for (gen in top_res_names) {
+    if (sd(mat_species_top[, species]) > 0 & sd(mat_res_top[, gen]) > 0) {
+      test <- cor.test(mat_species_top[, species], mat_res_top[, gen], method = "spearman", exact = FALSE)
+      tabla_coocurrencia_sp <- rbind(tabla_coocurrencia_sp, data.frame(Species = species, ARG = gen, rho = test$estimate, p_val = test$p.value))
+    }
+  }
+}
+
+tabla_coocurrencia_sp$p_adj <- p.adjust(tabla_coocurrencia_sp$p_val, method = "BH")
+tabla_significativa_sp <- tabla_coocurrencia_sp %>% 
+  mutate(Significance = case_when(p_adj < 0.001 ~ "***", p_adj < 0.01 ~ "**", p_adj < 0.05 ~ "*", TRUE ~ ""))
+
+write.csv(tabla_significativa_sp %>% arrange(p_adj), paste0(dir_cross_sp, "/Table_Species_ARG_Correlations.csv"), row.names = FALSE)
+
+species_unicas <- unique(tabla_significativa_sp$Species)
+labels_y_sp    <- setNames(lapply(species_unicas, function(x) {
+  if (grepl("sp\\. NEB 394", x)) {
+    parte_genero <- sub(" sp\\. NEB 394.*", "", x)
+    bquote(italic(.(parte_genero)) ~ "sp. NEB 394")
+  } else {
+    bquote(italic(.(x)))
+  }
+}), species_unicas)
+
+plot_cross_heatmap_sp <- ggplot(tabla_significativa_sp, aes(x = ARG, y = Species, fill = rho)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = Significance), color = "black", size = 3, vjust = 0.7) +
+  scale_fill_gradient2(low = "#4575B4", mid = "white", high = "#D73027", midpoint = 0, limits = c(-1, 1), name = "Spearman's \nrho") +
+  scale_x_discrete(labels = labels_x) +
+  scale_y_discrete(labels = labels_y_sp) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size = 8), 
+    axis.text.y = element_text(color = "black", size = 9),                        
+    axis.title = element_blank(), panel.grid = element_blank(), 
+    plot.title = element_text(face = "bold", size = 12)
+  ) +
+  labs(title = "Co-occurrence: Core Species vs Core Antimicrobial Resistance Genes", subtitle = "* FDR p < 0.05, ** FDR p < 0.01, *** FDR p < 0.001")
+
+ggsave(paste0(dir_cross_sp, "/Figure_Heatmap_Species_vs_ARG.png"), plot = plot_cross_heatmap_sp, width = 12, height = 7, dpi = 300)
+ggsave(paste0(dir_cross_sp, "/Figure_Heatmap_Species_vs_ARG.tiff"), plot = plot_cross_heatmap_sp, width = 12, height = 7, dpi = 500, compression = "lzw")
+```
+
+## Consolidation of Master ARG Correlation Tables (Genus & Species)
+
+```{r consolidate-arg-correlations, eval=FALSE}
+dir_tablas <- "/Scratch/nemerita/proyectos/projectswaters/RESISTOMAvsABUNDANCIAvsAMBIENTE"
+setwd(dir_tablas)
+
+archivos_csv <- list.files(pattern = ".*ARG.*\\.csv$")
+
+lista_tablas <- lapply(archivos_csv, function(archivo) {
+  df <- read.csv(archivo, check.names = FALSE)
+  df$Taxonomic_Level <- ifelse(grepl("Species", archivo), "Species", "Genus")
+  return(df)
+})
+
+tabla_consolidada <- bind_rows(lista_tablas) %>%
+  select(Taxonomic_Level, everything())
+
+write.csv(tabla_consolidada, "Table_Consolidated_Master_ARG_Correlations.csv", row.names = FALSE)
+```
+
+<hr>
+
+# Session Information {.unnumbered}
+
+For full reproducibility, the R environment, operating system, and package versions used to compile this workflow are listed below:
+
+```{r session-info, echo=FALSE}
+sessionInfo()
+```
